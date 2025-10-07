@@ -2,7 +2,7 @@
   "$schema": "node_modules/wrangler/config-schema.json",
   "name": "ndleworker",
   "vars": {
-    "ANALYTICS_ENDPOINT": "https://api.us-west-2.aws.tinybird.co/v0/events?name=link_clicks"
+    "ANALYTICS_ENDPOINT": ""
   },
   "main": "src/index.ts",
   "compatibility_date": "2025-09-15",
