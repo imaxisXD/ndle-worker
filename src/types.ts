@@ -63,6 +63,7 @@ export type Bindings = {
 	ANALYTICS_TOKEN?: string;
 	WORKER_VERSION?: string;
 	TRACKING_ENABLED?: string;
+	LOG_LEVEL?: string;
 };
 
 

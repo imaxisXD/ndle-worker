@@ -29,15 +29,27 @@ function makeCacheRequestFromContext(c: Context): Request {
  * @param location - The location to redirect to
  * @returns The redirect response
  */
-function buildRedirectResponse(location: URL): Response {
-	return new Response("", {
-		status: 301,
-		headers: new Headers({
-			Location: location.toString(),
-			"Cache-Control": `public, max-age=${MAX_AGE_SECONDS}`,
-			"Content-Type": "text/plain; charset=utf-8",
-		}),
-	});
+function buildClientRedirectResponse(location: URL): Response {
+    return new Response("", {
+        status: 302,
+        headers: new Headers({
+            Location: location.toString(),
+            "Cache-Control": "no-store, max-age=0",
+            "Content-Type": "text/plain; charset=utf-8",
+        }),
+    });
+}
+
+// Cacheable variant for server-side Worker Cache storage
+function buildCacheableRedirectResponse(location: URL): Response {
+    return new Response("", {
+        status: 301,
+        headers: new Headers({
+            Location: location.toString(),
+            "Cache-Control": `public, max-age=${MAX_AGE_SECONDS}`,
+            "Content-Type": "text/plain; charset=utf-8",
+        }),
+    });
 }
 
 /**
@@ -227,7 +239,8 @@ async function buildAnalyticsInput(
 export {
 	makeCacheKeyFromContext,
 	makeCacheRequestFromContext,
-	buildRedirectResponse,
+    buildClientRedirectResponse,
+    buildCacheableRedirectResponse,
 	checkCacheAndReturnElseSave,
 	sha256Hex,
 	getBooleanEnv,

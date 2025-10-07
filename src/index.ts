@@ -2,13 +2,15 @@ import { Redis } from "@upstash/redis/cloudflare";
 import { type Context, Hono } from "hono";
 import { logger } from "hono/logger";
 import {
-    buildRedirectResponse,
-    checkCacheAndReturnElseSave,
-    makeCacheRequestFromContext,
-    buildAnalyticsInput,
+	buildClientRedirectResponse,
+	buildCacheableRedirectResponse,
+	checkCacheAndReturnElseSave,
+	makeCacheRequestFromContext,
+	buildAnalyticsInput,
 } from "@helper";
 import { sendAnalyticsEvent } from "./analytics";
-import type { AnalyticsEventInput, Bindings as EnvBindings, RedisValueObject } from "./types";
+import type { Bindings as EnvBindings, RedisValueObject } from "./types";
+import { createRequestLogger, type RequestLogger } from "./log";
 
 type Bindings = EnvBindings;
 
@@ -19,128 +21,131 @@ app.use(logger());
  * Get the full short-link object from Redis and its destination URL.
  * Reads Redis once and returns both values for reuse by callers.
  */
-async function getUrlFromRedis(c: Context): Promise<{ url: URL; redisValue: RedisValueObject } | undefined> {
-    const slug = c.req.param("websiteSlug");
-    const redis = Redis.fromEnv(c.env);
-    const value = await redis.json.get<RedisValueObject>(slug);
+async function getUrlFromRedis(c: Context, log?: RequestLogger): Promise<{ url: URL; redisValue: RedisValueObject } | undefined> {
+	const slug = c.req.param("websiteSlug");
+	const redis = Redis.fromEnv(c.env);
+	log?.debug("redis.get.start", { slug });
+	const value = await redis.json.get<RedisValueObject>(slug);
 
-    if (value && value.destination) {
-        try {
-            const url = new URL(value.destination);
-            console.log("Redis: Found the url", url.toString());
-            return { url, redisValue: value };
-        } catch (_err) {
-            // Invalid URL stored; treat as not found
-            return undefined;
-        }
-    }
+	if (value && value.destination) {
+		try {
+			const url = new URL(value.destination);
+			log?.info("redis.get.hit", { slug, destination: url.toString() });
+			return { url, redisValue: value };
+		} catch (_err) {
+			log?.warn("redis.get.invalid_url", { slug, destination: value.destination });
+			return undefined;
+		}
+	}
+	log?.info("redis.get.miss", { slug });
 }
-
 
 app.get("/:websiteSlug", async (c) => {
 	const start = Date.now();
 	const slug = c.req.param("websiteSlug");
-	if (!slug) return c.text("Not found", 404);
-	if (c.req.method !== "GET") return c.text("Method not allowed", 405);
+	const log = createRequestLogger(c, { slug });
+	log.info("request.received");
+	if (!slug) {
+		log.warn("request.slug_missing");
+		return c.text("Not found", 404);
+	}
+	if (c.req.method !== "GET") {
+		log.warn("request.method_not_allowed", { method: c.req.method });
+		return c.text("Method not allowed", 405);
+	}
+	log.debug("cache.open.start", { cache: "redirects" });
 	const cache = await caches.open("redirects");
 
-    // Cache hit - return cached redirect (301 with Location header)
 	const cached = await checkCacheAndReturnElseSave(c, cache);
 	if (cached) {
 		const redirectLatency = Date.now() - start;
-		console.log(`🕰️ Redirect latency: ${redirectLatency}ms`);
-		console.log(
-			"Cache: Found the cached redirect",
-			cached.headers.get("Location"),
-		);
+		const destination = cached.headers.get("Location") || "";
+		log.info("cache.hit", { destination, latency_ms: redirectLatency, status: 301 });
 
-		// Fire-and-forget analytics event
 		c.executionCtx.waitUntil(
 			(async () => {
 				try {
 					const destination = cached.headers.get("Location") || "";
-                    // Fetch Redis value in background to enrich analytics without blocking response
-                    let redisValue: RedisValueObject | null = null;
-                    try {
-                        const result = await getUrlFromRedis(c);
-                        redisValue = result?.redisValue ?? null;
-                    } catch (_err) {
-                        redisValue = null;
-                    }
-                    const event = await buildAnalyticsInput(c, destination, slug, redirectLatency, redisValue);
+					let redisValue: RedisValueObject | null = null;
+					try {
+						const result = await getUrlFromRedis(c, log.child({ component: "redis" }));
+						redisValue = result?.redisValue ?? null;
+					} catch (_err) {
+						log.warn("redis.get.background.error", { error: String(_err) });
+						redisValue = null;
+					}
+					const event = await buildAnalyticsInput(c, destination, slug, redirectLatency, redisValue);
 					if (c.env.ANALYTICS_ENDPOINT && c.env.ANALYTICS_TOKEN) {
-						console.log("📊 Sending analytics event from Cache Hit", event);
+						log.info("analytics.send.start", { source: "cache" });
 						const response = await sendAnalyticsEvent({
 							endpoint: c.env.ANALYTICS_ENDPOINT,
 							token: c.env.ANALYTICS_TOKEN,
 							event,
 						});
-						console.log("📊 Analytics event sent from Cache Hit", response);
+						log.info("analytics.send.success", { source: "cache", status: response.status });
 					}
 				} catch (error) {
-					console.error("Error: Analytics send (cache hit)", error);
+					log.error("analytics.send.error", { source: "cache", error: String(error) });
 				}
 			})(),
 		);
 		return cached;
 	}
 
-    // Cache miss - get url and redis value from Redis and store in Cloudflare cache
-    const redisResult = await getUrlFromRedis(c);
+	log.info("cache.miss");
+	const redisResult = await getUrlFromRedis(c, log.child({ component: "redis" }));
 
-    if (redisResult?.url) {
-        const url = redisResult.url;
-		// Store in Cloudflare cache as a background task - response is sent immediately
-		// while cache is updated asynchronously
+	if (redisResult?.url) {
+		const url = redisResult.url;
 		c.executionCtx.waitUntil(
 			(async () => {
 				try {
 					const cacheRequest = makeCacheRequestFromContext(c);
-					const redirectResponse = buildRedirectResponse(url);
+					const redirectResponse = buildCacheableRedirectResponse(url);
 
+					log.info("cache.put.start", { destination: url.toString() });
 					await cache.put(cacheRequest, redirectResponse);
 
-					console.log("Background task: Stored new response in cache");
+					log.info("cache.put.success", { destination: url.toString() });
 				} catch (error) {
-					console.error(
-						"Error: Background task: Failed to store in cache:",
-						error,
+					log.error(
+						"cache.put.error",
+						{ error: String(error) },
 					);
 				}
 			})(),
 		);
-		const response = buildRedirectResponse(url);
+		const response = buildClientRedirectResponse(url);
 		const redirectLatency = Date.now() - start;
-		console.log(`🕰️ Redirect latency: ${redirectLatency}ms`);
+		log.info("redirect", { source: "redis", destination: url.toString(), latency_ms: redirectLatency, status: 302 });
 
-		// Fire-and-forget analytics event
 		c.executionCtx.waitUntil(
 			(async () => {
 				try {
-					console.log("📊 Building analytics event from Cache Miss", redisResult.redisValue);
-                    const event = await buildAnalyticsInput(
-                        c,
-                        url.toString(),
-                        slug,
-                        redirectLatency,
-                        redisResult.redisValue,
-                    );
+					const event = await buildAnalyticsInput(
+						c,
+						url.toString(),
+						slug,
+						redirectLatency,
+						redisResult.redisValue,
+					);
 					if (c.env.ANALYTICS_ENDPOINT && c.env.ANALYTICS_TOKEN) {
-						console.log("📊 Sending analytics event from Cache Miss", event);
+						log.info("analytics.send.start", { source: "redis" });
 						await sendAnalyticsEvent({
 							endpoint: c.env.ANALYTICS_ENDPOINT,
 							token: c.env.ANALYTICS_TOKEN,
 							event,
 						});
-						console.log("📊 Analytics event sent from Cache Miss", response);
+						log.info("analytics.send.success", { source: "redis" });
 					}
 				} catch (error) {
-					console.error("Error: Analytics send (cache miss)", error);
+					log.error("analytics.send.error", { source: "redis", error: String(error) });
 				}
 			})(),
 		);
 		return response;
 	} else {
+		log.warn("not_found", { slug });
 		return c.notFound();
 	}
 });
