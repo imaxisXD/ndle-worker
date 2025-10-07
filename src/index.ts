@@ -1,6 +1,6 @@
 import { Redis } from "@upstash/redis/cloudflare";
 import { type Context, Hono } from "hono";
-import { logger } from "hono/logger";
+
 import {
 	buildClientRedirectResponse,
 	buildCacheableRedirectResponse,
@@ -15,7 +15,6 @@ import { createRequestLogger, type RequestLogger } from "./log";
 type Bindings = EnvBindings;
 
 const app = new Hono<{ Bindings: Bindings }>();
-app.use(logger());
 
 /**
  * Get the full short-link object from Redis and its destination URL.
