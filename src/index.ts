@@ -39,7 +39,29 @@ async function getUrlFromRedis(c: Context, log?: RequestLogger): Promise<{ url: 
 	log?.info("No Redis entry for slug", { slug });
 }
 
-app.get("/:websiteSlug", async (c) => {
+// Serve empty, long-lived responses for browser-requested icons to avoid hitting Redis
+function buildNoContentResponse(status = 204, cacheSeconds = 31536000): Response {
+	return new Response(null, {
+		status,
+		headers: { "Cache-Control": `public, max-age=${cacheSeconds}, immutable` },
+	});
+}
+
+
+app.get("/favicon.ico", () => buildNoContentResponse());
+app.get("/apple-touch-icon.png", () => buildNoContentResponse());
+app.get("/apple-touch-icon-precomposed.png", () => buildNoContentResponse());
+app.get("/apple-touch-icon-:variant.png", () => buildNoContentResponse());
+
+
+app.get("/:filename{[^/]+\\.[a-zA-Z0-9]+}", () =>
+	new Response("Not found", {
+		status: 404,
+		headers: { "Cache-Control": "public, max-age=86400" },
+	}),
+);
+
+app.get("/:websiteSlug{[A-Za-z0-9_-]+}", async (c) => {
 	const start = Date.now();
 	const slug = c.req.param("websiteSlug");
 	const log = createRequestLogger(c, { slug });
