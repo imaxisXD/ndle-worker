@@ -23,43 +23,43 @@ const app = new Hono<{ Bindings: Bindings }>();
 async function getUrlFromRedis(c: Context, log?: RequestLogger): Promise<{ url: URL; redisValue: RedisValueObject } | undefined> {
 	const slug = c.req.param("websiteSlug");
 	const redis = Redis.fromEnv(c.env);
-	log?.debug("redis.get.start", { slug });
+	log?.debug("Looking up slug in Redis", { slug });
 	const value = await redis.json.get<RedisValueObject>(slug);
 
 	if (value && value.destination) {
 		try {
 			const url = new URL(value.destination);
-			log?.info("redis.get.hit", { slug, destination: url.toString() });
+			log?.info("Found destination in Redis", { slug, destination: url.toString() });
 			return { url, redisValue: value };
 		} catch (_err) {
-			log?.warn("redis.get.invalid_url", { slug, destination: value.destination });
+			log?.warn("Destination in Redis is not a valid URL", { slug, destination: value.destination });
 			return undefined;
 		}
 	}
-	log?.info("redis.get.miss", { slug });
+	log?.info("No Redis entry for slug", { slug });
 }
 
 app.get("/:websiteSlug", async (c) => {
 	const start = Date.now();
 	const slug = c.req.param("websiteSlug");
 	const log = createRequestLogger(c, { slug });
-	log.info("request.received");
+	log.info("Incoming request");
 	if (!slug) {
-		log.warn("request.slug_missing");
+		log.warn("Missing slug in path");
 		return c.text("Not found", 404);
 	}
 	if (c.req.method !== "GET") {
-		log.warn("request.method_not_allowed", { method: c.req.method });
+		log.warn("Blocked non-GET request", { method: c.req.method });
 		return c.text("Method not allowed", 405);
 	}
-	log.debug("cache.open.start", { cache: "redirects" });
+	log.debug("Opening cache", { cache: "redirects" });
 	const cache = await caches.open("redirects");
 
 	const cached = await checkCacheAndReturnElseSave(c, cache);
 	if (cached) {
 		const redirectLatency = Date.now() - start;
 		const destination = cached.headers.get("Location") || "";
-		log.info("cache.hit", { destination, latency_ms: redirectLatency, status: 301 });
+		log.info("Cache hit — returning cached redirect", { destination, latency_ms: redirectLatency, status: 301 });
 
 		c.executionCtx.waitUntil(
 			(async () => {
@@ -70,28 +70,28 @@ app.get("/:websiteSlug", async (c) => {
 						const result = await getUrlFromRedis(c, log.child({ component: "redis" }));
 						redisValue = result?.redisValue ?? null;
 					} catch (_err) {
-						log.warn("redis.get.background.error", { error: String(_err) });
+						log.warn("Background Redis lookup failed", { error: String(_err) });
 						redisValue = null;
 					}
 					const event = await buildAnalyticsInput(c, destination, slug, redirectLatency, redisValue);
 					if (c.env.ANALYTICS_ENDPOINT && c.env.ANALYTICS_TOKEN) {
-						log.info("analytics.send.start", { source: "cache" });
+						log.info("Sending analytics (cache hit)", { source: "cache" });
 						const response = await sendAnalyticsEvent({
 							endpoint: c.env.ANALYTICS_ENDPOINT,
 							token: c.env.ANALYTICS_TOKEN,
 							event,
 						});
-						log.info("analytics.send.success", { source: "cache", status: response.status });
+						log.info("Analytics sent", { source: "cache", status: response.status });
 					}
 				} catch (error) {
-					log.error("analytics.send.error", { source: "cache", error: String(error) });
+					log.error("Failed to send analytics (cache hit)", { source: "cache", error: String(error) });
 				}
 			})(),
 		);
 		return cached;
 	}
 
-	log.info("cache.miss");
+	log.info("Cache miss — looking up in Redis");
 	const redisResult = await getUrlFromRedis(c, log.child({ component: "redis" }));
 
 	if (redisResult?.url) {
@@ -102,13 +102,13 @@ app.get("/:websiteSlug", async (c) => {
 					const cacheRequest = makeCacheRequestFromContext(c);
 					const redirectResponse = buildCacheableRedirectResponse(url);
 
-					log.info("cache.put.start", { destination: url.toString() });
+					log.info("Storing redirect in cache", { destination: url.toString() });
 					await cache.put(cacheRequest, redirectResponse);
 
-					log.info("cache.put.success", { destination: url.toString() });
+					log.info("Stored redirect in cache", { destination: url.toString() });
 				} catch (error) {
 					log.error(
-						"cache.put.error",
+						"Failed to store in cache",
 						{ error: String(error) },
 					);
 				}
@@ -116,7 +116,7 @@ app.get("/:websiteSlug", async (c) => {
 		);
 		const response = buildClientRedirectResponse(url);
 		const redirectLatency = Date.now() - start;
-		log.info("redirect", { source: "redis", destination: url.toString(), latency_ms: redirectLatency, status: 302 });
+		log.info("Redirecting to destination", { source: "redis", destination: url.toString(), latency_ms: redirectLatency, status: 302 });
 
 		c.executionCtx.waitUntil(
 			(async () => {
@@ -129,22 +129,22 @@ app.get("/:websiteSlug", async (c) => {
 						redisResult.redisValue,
 					);
 					if (c.env.ANALYTICS_ENDPOINT && c.env.ANALYTICS_TOKEN) {
-						log.info("analytics.send.start", { source: "redis" });
+						log.info("Sending analytics (cache miss)", { source: "redis" });
 						await sendAnalyticsEvent({
 							endpoint: c.env.ANALYTICS_ENDPOINT,
 							token: c.env.ANALYTICS_TOKEN,
 							event,
 						});
-						log.info("analytics.send.success", { source: "redis" });
+						log.info("Analytics sent", { source: "redis" });
 					}
 				} catch (error) {
-					log.error("analytics.send.error", { source: "redis", error: String(error) });
+					log.error("Failed to send analytics (cache miss)", { source: "redis", error: String(error) });
 				}
 			})(),
 		);
 		return response;
 	} else {
-		log.warn("not_found", { slug });
+		log.warn("Slug not found");
 		return c.notFound();
 	}
 });

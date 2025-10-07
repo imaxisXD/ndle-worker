@@ -9,57 +9,27 @@ const LEVEL_ORDER: Record<LogLevel, number> = {
 	error: 40,
 };
 
-const PREFERRED_ORDER = [
-	"rid",
-	"slug",
-	"method",
-	"path",
-	"status",
-	"destination",
-	"latency_ms",
-	"source",
-	"component",
-	"colo",
-];
-
 function normalizeLevel(value: string | undefined): LogLevel {
 	const v = (value ?? "info").toLowerCase();
 	if (v === "debug" || v === "info" || v === "warn" || v === "error") return v;
 	return "info";
 }
 
-function safeStringify(value: unknown): string {
-	try {
-		return typeof value === "string" ? value : JSON.stringify(value);
-	} catch {
-		return String(value);
-	}
-}
-
-function shortRequestId(value: string): string {
-	let v = String(value);
-	const dash = v.indexOf("-");
-	if (dash > 0) v = v.slice(0, dash);
-	return v.slice(0, 12);
-}
-
-function formatOrderedKVs(fields: Record<string, unknown> | undefined): string {
+function formatHumanContext(fields: Record<string, unknown> | undefined): string {
 	if (!fields) return "";
-	const entries = Object.entries(fields);
-	const picked: string[] = [];
-	const used = new Set<string>();
-	for (const key of PREFERRED_ORDER) {
-		if (key in fields) {
-			picked.push(`${key}=${safeStringify(fields[key])}`);
-			used.add(key);
-		}
-	}
-	const rest = entries
-		.filter(([k]) => !used.has(k))
-		.sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))
-		.map(([k, v]) => `${k}=${safeStringify(v)}`);
-	const parts = [...picked, ...rest];
-	return parts.length ? ` ${parts.join(" ")}` : "";
+	const f = fields as Record<string, any>;
+	const parts: string[] = [];
+	const method = f.method as string | undefined;
+	const path = f.path as string | undefined;
+	if (method || path) parts.push([method, path].filter(Boolean).join(" "));
+	if (f.slug) parts.push(`slug ${String(f.slug)}`);
+	if (f.status !== undefined) parts.push(`status ${String(f.status)}`);
+	if (f.destination) parts.push(`→ ${String(f.destination)}`);
+	if (f.latency_ms !== undefined) parts.push(`${String(f.latency_ms)}ms`);
+	if (f.source) parts.push(`via ${String(f.source)}`);
+	if (f.component) parts.push(String(f.component));
+	if (f.colo) parts.push(`dc ${String(f.colo)}`);
+	return parts.length ? ` — ${parts.join(" | ")}` : "";
 }
 
 export type RequestLogger = {
@@ -76,9 +46,7 @@ export function createRequestLogger(c: Context, extra?: Record<string, unknown>)
 	const cf = raw.cf ?? {};
 	const level = normalizeLevel(c.env.LOG_LEVEL);
 	const threshold = LEVEL_ORDER[level];
-	const requestId = req.header("cf-ray") ?? req.header("x-request-id") ?? crypto.randomUUID();
 	const baseFields: Record<string, unknown> = {
-		rid: shortRequestId(requestId),
 		method: req.method,
 		path: new URL(req.url).pathname,
 		colo: cf.colo ?? null,
@@ -89,7 +57,8 @@ export function createRequestLogger(c: Context, extra?: Record<string, unknown>)
 		if (LEVEL_ORDER[lvl] < threshold) return;
 		const ts = new Date().toISOString();
 		const levelLabel = lvl.toUpperCase();
-		const line = `${ts} [${levelLabel}] ${message}${formatOrderedKVs({ ...baseFields, ...fields })}`;
+		const context = formatHumanContext({ ...baseFields, ...fields });
+		const line = `[${levelLabel}] ${message}${context} @ ${ts}`;
 		switch (lvl) {
 			case "debug":
 				console.debug(line);
