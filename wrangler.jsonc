@@ -1,9 +1,6 @@
 {
   "$schema": "node_modules/wrangler/config-schema.json",
   "name": "ndleworker",
-  "vars": {
-    "ANALYTICS_ENDPOINT": ""
-  },
   "main": "src/index.ts",
   "compatibility_date": "2025-09-15",
   "workers_dev": false,

@@ -99,6 +99,36 @@ function getDeviceType(userAgent: string): string | null {
 }
 
 /**
+ * Determine operating system using Client Hints when available, else fallback to UA parsing.
+ */
+function getOS(userAgent: string, secChUaPlatform?: string | null): string | null {
+	// Prefer client hints if provided
+	const platform = (secChUaPlatform ?? "").replace(/"/g, "").trim();
+	if (platform && platform.toLowerCase() !== "unknown") {
+		return platform;
+	}
+
+	// Fallback to coarse UA parsing
+	if (!userAgent) return null;
+	const ua = userAgent.toLowerCase();
+
+	// iOS devices
+	if (/iphone|ipad|ipod/.test(ua)) return "iOS";
+	// Android before Linux check
+	if (/android/.test(ua)) return "Android";
+	// ChromeOS
+	if (/cros\s/.test(ua)) return "ChromeOS";
+	// Windows
+	if (/windows nt/.test(ua) || /windows/.test(ua)) return "Windows";
+	// macOS (exclude iOS which is already returned)
+	if (/mac os x|macintosh/.test(ua)) return "macOS";
+	// Generic Linux (exclude Android which is already returned)
+	if (/linux/.test(ua)) return "Linux";
+
+	return null;
+}
+
+/**
  * Bot detection using Cloudflare Bot Management when available, else UA regex fallback.
  */
 function isBot(userAgent: string, cf?: any): boolean {
@@ -144,7 +174,7 @@ async function buildAnalyticsInput(
 	// Prefer client hints when available for device, else UA parsing
 	const deviceType = getDeviceType(userAgent);
 	const browser = req.header("sec-ch-ua") ?? null;
-	const os = req.header("sec-ch-ua-platform") ?? null;
+	const os = getOS(userAgent, req.header("sec-ch-ua-platform") ?? null);
 	const requestId = req.header("cf-ray") ?? req.header("x-request-id") ?? crypto.randomUUID();
 	const ip = req.header("cf-connecting-ip") ?? req.header("x-forwarded-for") ?? "";
 	const ipHash = await sha256Hex(ip);
@@ -205,3 +235,4 @@ export {
 	isBot,
 	buildAnalyticsInput,
 };
+
