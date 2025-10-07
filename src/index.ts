@@ -69,16 +69,16 @@ app.get("/:websiteSlug", async (c) => {
                     }
                     const event = await buildAnalyticsInput(c, destination, slug, redirectLatency, redisValue);
 					if (c.env.ANALYTICS_ENDPOINT && c.env.ANALYTICS_TOKEN) {
-						console.log("Background task: Sending analytics event", event);
+						console.log("📊 Sending analytics event from Cache Hit", event);
 						const response = await sendAnalyticsEvent({
 							endpoint: c.env.ANALYTICS_ENDPOINT,
 							token: c.env.ANALYTICS_TOKEN,
 							event,
 						});
-						console.log("Background task: Analytics event sent", response);
+						console.log("📊 Analytics event sent from Cache Hit", response);
 					}
 				} catch (error) {
-					console.error("Error: Background analytics send (cache hit)", error);
+					console.error("Error: Analytics send (cache hit)", error);
 				}
 			})(),
 		);
@@ -117,6 +117,7 @@ app.get("/:websiteSlug", async (c) => {
 		c.executionCtx.waitUntil(
 			(async () => {
 				try {
+					console.log("📊 Building analytics event from Cache Miss", redisResult.redisValue);
                     const event = await buildAnalyticsInput(
                         c,
                         url.toString(),
@@ -125,14 +126,16 @@ app.get("/:websiteSlug", async (c) => {
                         redisResult.redisValue,
                     );
 					if (c.env.ANALYTICS_ENDPOINT && c.env.ANALYTICS_TOKEN) {
+						console.log("📊 Sending analytics event from Cache Miss", event);
 						await sendAnalyticsEvent({
 							endpoint: c.env.ANALYTICS_ENDPOINT,
 							token: c.env.ANALYTICS_TOKEN,
 							event,
 						});
+						console.log("📊 Analytics event sent from Cache Miss", response);
 					}
 				} catch (error) {
-					console.error("Error: Background analytics send (cache miss)", error);
+					console.error("Error: Analytics send (cache miss)", error);
 				}
 			})(),
 		);
