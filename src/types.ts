@@ -64,6 +64,7 @@ export type Bindings = {
 	WORKER_VERSION?: string;
 	TRACKING_ENABLED?: string;
 	LOG_LEVEL?: string;
+	SHARED_SECRET?: string;
 };
 
 

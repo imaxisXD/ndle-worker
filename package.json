@@ -8,6 +8,7 @@
   },
   "dependencies": {
     "@upstash/redis": "^1.35.3",
+    "convex": "^1.27.4",
     "hono": "^4.9.7"
   },
   "devDependencies": {

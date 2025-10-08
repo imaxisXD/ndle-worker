@@ -11,10 +11,40 @@ import {
 import { sendAnalyticsEvent } from "./analytics";
 import type { Bindings as EnvBindings, RedisValueObject } from "./types";
 import { createRequestLogger, type RequestLogger } from "./log";
+import { ConvexHttpClient } from "convex/browser";
+import { api } from "./convex-api";
 
 type Bindings = EnvBindings;
+const convexAddress = "https://tame-sparrow-238.convex.cloud";
 
 const app = new Hono<{ Bindings: Bindings }>();
+const convex = new ConvexHttpClient(convexAddress);
+
+async function drainOrCancel(res: Response) {
+	try {
+		if (res.ok) {
+			await res.arrayBuffer();
+		} else {
+			res.body?.cancel();
+		}
+	} catch {
+		try { res.body?.cancel(); } catch {}
+	}
+}
+
+async function executeConvexMutation(c: Context, urlId: string, userId: string) {
+	const log = createRequestLogger(c, { component: "convex" });
+	try {
+		await convex.mutation(api.urlAnalytics.mutateClickCount, {
+			sharedSecret: c.env.SHARED_SECRET,
+			urlId,
+			userId,
+		});
+		log.debug("Convex mutation done", { urlId, userId });
+	} catch (err) {
+		log.warn("Convex mutation failed", { error: String(err) });
+	}
+}
 
 /**
  * Get the full short-link object from Redis and its destination URL.
@@ -39,7 +69,6 @@ async function getUrlFromRedis(c: Context, log?: RequestLogger): Promise<{ url: 
 	log?.info("No Redis entry for slug", { slug });
 }
 
-// Serve empty, long-lived responses for browser-requested icons to avoid hitting Redis
 function buildNoContentResponse(status = 204, cacheSeconds = 31536000): Response {
 	return new Response(null, {
 		status,
@@ -96,15 +125,21 @@ app.get("/:websiteSlug{[A-Za-z0-9_-]+}", async (c) => {
 						redisValue = null;
 					}
 					const event = await buildAnalyticsInput(c, destination, slug, redirectLatency, redisValue);
+					const tasks: Promise<unknown>[] = [];
 					if (c.env.ANALYTICS_ENDPOINT && c.env.ANALYTICS_TOKEN) {
 						log.info("Sending analytics (cache hit)", { source: "cache" });
-						const response = await sendAnalyticsEvent({
-							endpoint: c.env.ANALYTICS_ENDPOINT,
-							token: c.env.ANALYTICS_TOKEN,
-							event,
-						});
-						log.info("Analytics sent", { source: "cache", status: response.status });
+						tasks.push(
+							sendAnalyticsEvent({
+								endpoint: c.env.ANALYTICS_ENDPOINT,
+								token: c.env.ANALYTICS_TOKEN,
+								event,
+							}).then(drainOrCancel),
+						);
 					}
+					if (redisValue?.link_id && redisValue?.user_id) {
+						tasks.push(executeConvexMutation(c, redisValue.link_id, redisValue.user_id));
+					}
+					if (tasks.length) await Promise.allSettled(tasks);
 				} catch (error) {
 					log.error("Failed to send analytics (cache hit)", { source: "cache", error: String(error) });
 				}
@@ -150,15 +185,22 @@ app.get("/:websiteSlug{[A-Za-z0-9_-]+}", async (c) => {
 						redirectLatency,
 						redisResult.redisValue,
 					);
+					const tasks: Promise<unknown>[] = [];
 					if (c.env.ANALYTICS_ENDPOINT && c.env.ANALYTICS_TOKEN) {
 						log.info("Sending analytics (cache miss)", { source: "redis" });
-						await sendAnalyticsEvent({
-							endpoint: c.env.ANALYTICS_ENDPOINT,
-							token: c.env.ANALYTICS_TOKEN,
-							event,
-						});
-						log.info("Analytics sent", { source: "redis" });
+						tasks.push(
+							sendAnalyticsEvent({
+								endpoint: c.env.ANALYTICS_ENDPOINT,
+								token: c.env.ANALYTICS_TOKEN,
+								event,
+							}).then(drainOrCancel),
+						);
 					}
+					const { link_id: linkId, user_id: userId } = redisResult.redisValue;
+					if (linkId && userId) {
+						tasks.push(executeConvexMutation(c, linkId, userId));
+					}
+					if (tasks.length) await Promise.allSettled(tasks);
 				} catch (error) {
 					log.error("Failed to send analytics (cache miss)", { source: "redis", error: String(error) });
 				}
