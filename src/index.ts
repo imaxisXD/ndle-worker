@@ -106,47 +106,50 @@ app.get("/:websiteSlug{[A-Za-z0-9_-]+}", async (c) => {
 	log.debug("Opening cache", { cache: "redirects" });
 	const cache = await caches.open("redirects");
 
-	const cached = await checkCacheAndReturnElseSave(c, cache);
-	if (cached) {
-		const redirectLatency = Date.now() - start;
-		const destination = cached.headers.get("Location") || "";
-		log.info("Cache hit — returning cached redirect", { destination, latency_ms: redirectLatency, status: 301 });
+    const cached = await checkCacheAndReturnElseSave(c, cache);
+    if (cached) {
+        const redirectLatency = Date.now() - start;
+        const destination = cached.headers.get("Location") || "";
+        log.info("Cache hit — using cached target but returning client redirect", { destination, latency_ms: redirectLatency, status: 302 });
 
-		c.executionCtx.waitUntil(
-			(async () => {
-				try {
-					const destination = cached.headers.get("Location") || "";
-					let redisValue: RedisValueObject | null = null;
-					try {
-						const result = await getUrlFromRedis(c, log.child({ component: "redis" }));
-						redisValue = result?.redisValue ?? null;
-					} catch (_err) {
-						log.warn("Background Redis lookup failed", { error: String(_err) });
-						redisValue = null;
-					}
-					const event = await buildAnalyticsInput(c, destination, slug, redirectLatency, redisValue);
-					const tasks: Promise<unknown>[] = [];
-					if (c.env.ANALYTICS_ENDPOINT && c.env.ANALYTICS_TOKEN) {
-						log.info("Sending analytics (cache hit)", { source: "cache" });
-						tasks.push(
-							sendAnalyticsEvent({
-								endpoint: c.env.ANALYTICS_ENDPOINT,
-								token: c.env.ANALYTICS_TOKEN,
-								event,
-							}).then(drainOrCancel),
-						);
-					}
-					if (redisValue?.link_id && redisValue?.user_id) {
-						tasks.push(executeConvexMutation(c, redisValue.link_id, redisValue.user_id));
-					}
-					if (tasks.length) await Promise.allSettled(tasks);
-				} catch (error) {
-					log.error("Failed to send analytics (cache hit)", { source: "cache", error: String(error) });
-				}
-			})(),
-		);
-		return cached;
-	}
+        c.executionCtx.waitUntil(
+            (async () => {
+                try {
+                    const destination = cached.headers.get("Location") || "";
+                    let redisValue: RedisValueObject | null = null;
+                    try {
+                        const result = await getUrlFromRedis(c, log.child({ component: "redis" }));
+                        redisValue = result?.redisValue ?? null;
+                    } catch (_err) {
+                        log.warn("Background Redis lookup failed", { error: String(_err) });
+                        redisValue = null;
+                    }
+                    const event = await buildAnalyticsInput(c, destination, slug, redirectLatency, redisValue);
+                    const tasks: Promise<unknown>[] = [];
+                    if (c.env.ANALYTICS_ENDPOINT && c.env.ANALYTICS_TOKEN) {
+                        log.info("Sending analytics (cache hit)", { source: "cache" });
+                        tasks.push(
+                            sendAnalyticsEvent({
+                                endpoint: c.env.ANALYTICS_ENDPOINT,
+                                token: c.env.ANALYTICS_TOKEN,
+                                event,
+                            }).then(drainOrCancel),
+                        );
+                    }
+                    if (redisValue?.link_id && redisValue?.user_id) {
+                        tasks.push(executeConvexMutation(c, redisValue.link_id, redisValue.user_id));
+                    }
+                    if (tasks.length) await Promise.allSettled(tasks);
+                } catch (error) {
+                    log.error("Failed to send analytics (cache hit)", { source: "cache", error: String(error) });
+                }
+            })(),
+        );
+        if (destination) {
+            return buildClientRedirectResponse(new URL(destination));
+        }
+        return c.notFound();
+    }
 
 	log.info("Cache miss — looking up in Redis");
 	const redisResult = await getUrlFromRedis(c, log.child({ component: "redis" }));
