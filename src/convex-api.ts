@@ -26,12 +26,36 @@ export type PublicApiType = {
       Record<string, never>,
       any
     >;
-  };
-  urlAnalytics: {
-    mutateClickCount: FunctionReference<
+    getUserUrlsWithAnalytics: FunctionReference<
+      "query",
+      "public",
+      Record<string, never>,
+      any
+    >;
+    deleteUrl: FunctionReference<
       "mutation",
       "public",
-      { sharedSecret: string; urlId: string; userId: string },
+      { urlSlug: string },
+      any
+    >;
+  };
+  urlAnalytics: {
+    mutateUrlAnalytics: FunctionReference<
+      "mutation",
+      "public",
+      {
+        sharedSecret: string;
+        urlId: string;
+        urlStatusCode: number;
+        urlStatusMessage: string;
+        userId: string;
+      },
+      any
+    >;
+    getUrlAnalytics: FunctionReference<
+      "query",
+      "public",
+      { urlSlug: string },
       any
     >;
   };

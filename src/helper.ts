@@ -1,6 +1,9 @@
 import type { Context } from "hono";
 import { MAX_AGE_SECONDS } from "./const";
-import type { AnalyticsEventInput, RedisValueObject } from "./types";
+import type { AnalyticsEventInput, HealthStatus, RedisValueObject } from "./types";
+import { createRequestLogger } from "./log";
+import { api } from "./convex-api";
+import { ConvexHttpClient } from "convex/browser";
 
 /**
  * Make a cache key from the context
@@ -238,6 +241,236 @@ async function buildAnalyticsInput(
 	};
 }
 
+/**
+ * Determine the health status of a response
+ * @param response 
+ * @param responseTime 
+ * @param error 
+ * @returns The health status and whether the response is healthy
+ */
+
+function determineHealthStatus(
+	response: Response | null,
+	responseTime: number,
+	error: Error | null
+): { status: HealthStatus; isHealthy: boolean } {
+
+	if (error) {
+		const errorMessage = error.message.toLowerCase();
+		
+		if (errorMessage.includes('timeout') || errorMessage.includes('aborted')) {
+			return { status: "timeout", isHealthy: false };
+		}
+		if (errorMessage.includes('ssl') || errorMessage.includes('certificate')) {
+			return { status: "ssl_error", isHealthy: false };
+		}
+		if (errorMessage.includes('dns') || errorMessage.includes('name resolution')) {
+			return { status: "dns_error", isHealthy: false };
+		}
+		if (errorMessage.includes('network') || errorMessage.includes('connection')) {
+			return { status: "down", isHealthy: false };
+		}
+		return { status: "error", isHealthy: false };
+	}
+	
+
+	if (response) {
+		const status = response.status;
+		
+		if (status >= 300 && status < 400) {
+			const location = response.headers.get('location');
+			if (location && location.includes('redirect')) {
+				return { status: "redirect_loop", isHealthy: false };
+			}
+		}
+		
+		if (status >= 500) {
+			return { status: "down", isHealthy: false };
+		}
+		
+		if (status >= 400 && status < 500) {
+			return { status: "unstable", isHealthy: false };
+		}
+		
+		if (status >= 200 && status < 400) {
+			if (responseTime > 5000) {
+				return { status: "slow", isHealthy: false };
+			}
+			if (responseTime > 3000) {
+				return { status: "slow", isHealthy: true };
+			}
+			return { status: "healthy", isHealthy: true };
+		}
+	}
+	
+	return { status: "error", isHealthy: false };
+}
+
+
+/**
+ * Drain or cancel a response
+ * @param res - The response
+ */
+async function drainOrCancel(res: Response) {
+	try {
+		if (res.ok) {
+			await res.arrayBuffer();
+		} else {
+			res.body?.cancel();
+		}
+	} catch {
+		try { res.body?.cancel(); } catch {}
+	}
+}
+
+
+/**
+ * Execute combined Convex mutations for analytics and health checks
+ * @param c - The context
+ * @param urlId - The URL ID
+ * @param userId - The user ID
+ * @param convex - The Convex client
+ * @param healthCheckData - Optional health check data to record
+ */
+async function executeConvexWrites(
+	c: Context, 
+	urlId: string, 
+	userId: string, 
+	convex: ConvexHttpClient,
+	healthCheckData?: {
+		destinationUrl: string;
+		responseStatus: number;
+		responseTimeMs: number;
+		isHealthy: boolean;
+		healthStatus: HealthStatus;
+		errorMessage?: string;
+	}
+) {
+	const log = createRequestLogger(c, { component: "convex" });
+	const tasks: Promise<unknown>[] = [];
+
+	// Always record analytics click count
+	tasks.push(
+		convex.mutation(api.urlAnalytics.mutateUrlAnalytics, {
+			sharedSecret: c.env.SHARED_SECRET,
+			urlId,
+			userId,
+			urlStatusCode: healthCheckData?.responseStatus ?? 0,
+			urlStatusMessage: healthCheckData?.errorMessage ?? "",
+		}).catch(err => {
+			log.warn("Analytics mutation failed", { urlId, userId, error: String(err) });
+			throw err;
+		})
+	);
+
+	try {
+		await Promise.allSettled(tasks);
+		log.debug("Convex writes completed", { urlId, userId, healthCheckRecorded: !!healthCheckData });
+	} catch (err) {
+		log.warn("Some Convex writes failed", { urlId, userId, error: String(err) });
+	}
+}
+
+
+/**
+ * Perform a health check
+ * @param c - The context
+ * @param destinationUrl - The destination URL
+ * @param urlId - The URL ID
+ * @param userId - The user ID
+ * @param convex - The Convex client
+ */
+async function performHealthCheck(
+	c: Context, 
+	destinationUrl: string, 
+	urlId: string, 
+	userId: string,
+	convex: ConvexHttpClient
+) {
+	const log = createRequestLogger(c, { component: "health-check" });
+	const startTime = Date.now();
+	
+	try {
+
+		const controller = new AbortController();
+		const timeoutId = setTimeout(() => controller.abort(), 8000);
+		
+		const response = await fetch(destinationUrl, {
+			method: 'HEAD',
+			signal: controller.signal,
+			headers: {
+				'User-Agent': 'NDLE-HealthCheck/1.0',
+				'Accept': '*/*',
+			},
+		});
+		
+		clearTimeout(timeoutId);
+		const responseTime = Date.now() - startTime;
+		
+		const { status: healthStatus, isHealthy } = determineHealthStatus(response, responseTime, null);
+		
+		// Record both analytics and health check data
+		await executeConvexWrites(c, urlId, userId, convex, {
+			destinationUrl,
+			responseStatus: response.status,
+			responseTimeMs: responseTime,
+			isHealthy,
+			healthStatus,
+		});
+		
+		log.info("Health check completed", {
+			urlId,
+			destinationUrl,
+			status: response.status,
+			responseTime,
+			isHealthy,
+			healthStatus,
+		});
+		
+	} catch (error) {
+		const responseTime = Date.now() - startTime;
+		const errorMessage = error instanceof Error ? error.message : String(error);
+		const errorObj = error instanceof Error ? error : new Error(errorMessage);
+		
+		const { status: healthStatus, isHealthy } = determineHealthStatus(null, responseTime, errorObj);
+		
+		// Record both analytics and health check data (with error)
+		await executeConvexWrites(c, urlId, userId, convex, {
+			destinationUrl,
+			responseStatus: 0,
+			responseTimeMs: responseTime,
+			isHealthy,
+			healthStatus,
+			errorMessage,
+		});
+		
+		log.warn("Health check failed", {
+			urlId,
+			destinationUrl,
+			error: errorMessage,
+			responseTime,
+			isHealthy,
+			healthStatus,
+		});
+	}
+}
+
+
+/**
+ * Build a no content response
+ * @param status - The status code
+ * @param cacheSeconds - The cache seconds
+ * @returns The no content response
+ */
+function buildNoContentResponse(status = 204, cacheSeconds = 31536000): Response {
+	return new Response(null, {
+		status,
+		headers: { "Cache-Control": `public, max-age=${cacheSeconds}, immutable` },
+	});
+}
+
+
+
 export {
 	makeCacheKeyFromContext,
 	makeCacheRequestFromContext,
@@ -249,5 +482,10 @@ export {
 	getDeviceType,
 	isBot,
 	buildAnalyticsInput,
+	determineHealthStatus,
+	drainOrCancel,
+	executeConvexWrites,
+	performHealthCheck,
+	buildNoContentResponse,
 };
 

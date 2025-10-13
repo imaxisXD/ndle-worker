@@ -1,50 +1,38 @@
 import { Redis } from "@upstash/redis/cloudflare";
 import { type Context, Hono } from "hono";
-
 import {
 	buildClientRedirectResponse,
 	buildCacheableRedirectResponse,
 	checkCacheAndReturnElseSave,
 	makeCacheRequestFromContext,
 	buildAnalyticsInput,
+	buildNoContentResponse,
+	drainOrCancel,
+	performHealthCheck,
 } from "@helper";
 import { sendAnalyticsEvent } from "./analytics";
 import type { Bindings as EnvBindings, RedisValueObject } from "./types";
 import { createRequestLogger, type RequestLogger } from "./log";
 import { ConvexHttpClient } from "convex/browser";
-import { api } from "./convex-api";
 
 type Bindings = EnvBindings;
 const convexAddress = "https://tame-sparrow-238.convex.cloud";
 
+
 const app = new Hono<{ Bindings: Bindings }>();
 const convex = new ConvexHttpClient(convexAddress);
 
-async function drainOrCancel(res: Response) {
-	try {
-		if (res.ok) {
-			await res.arrayBuffer();
-		} else {
-			res.body?.cancel();
-		}
-	} catch {
-		try { res.body?.cancel(); } catch {}
-	}
-}
 
-async function executeConvexMutation(c: Context, urlId: string, userId: string) {
-	const log = createRequestLogger(c, { component: "convex" });
-	try {
-		await convex.mutation(api.urlAnalytics.mutateClickCount, {
-			sharedSecret: c.env.SHARED_SECRET,
-			urlId,
-			userId,
-		});
-		log.debug("Convex mutation done", { urlId, userId });
-	} catch (err) {
-		log.warn("Convex mutation failed", { error: String(err) });
-	}
-}
+app.get("/favicon.ico", () => buildNoContentResponse());
+app.get("/apple-touch-icon.png", () => buildNoContentResponse());
+app.get("/apple-touch-icon-precomposed.png", () => buildNoContentResponse());
+app.get("/apple-touch-icon-:variant.png", () => buildNoContentResponse());
+app.get("/:filename{[^/]+\\.[a-zA-Z0-9]+}", () =>
+	new Response("Not found", {
+		status: 404,
+		headers: { "Cache-Control": "public, max-age=86400" },
+	}),
+);
 
 /**
  * Get the full short-link object from Redis and its destination URL.
@@ -69,26 +57,6 @@ async function getUrlFromRedis(c: Context, log?: RequestLogger): Promise<{ url: 
 	log?.info("No Redis entry for slug", { slug });
 }
 
-function buildNoContentResponse(status = 204, cacheSeconds = 31536000): Response {
-	return new Response(null, {
-		status,
-		headers: { "Cache-Control": `public, max-age=${cacheSeconds}, immutable` },
-	});
-}
-
-
-app.get("/favicon.ico", () => buildNoContentResponse());
-app.get("/apple-touch-icon.png", () => buildNoContentResponse());
-app.get("/apple-touch-icon-precomposed.png", () => buildNoContentResponse());
-app.get("/apple-touch-icon-:variant.png", () => buildNoContentResponse());
-
-
-app.get("/:filename{[^/]+\\.[a-zA-Z0-9]+}", () =>
-	new Response("Not found", {
-		status: 404,
-		headers: { "Cache-Control": "public, max-age=86400" },
-	}),
-);
 
 app.get("/:websiteSlug{[A-Za-z0-9_-]+}", async (c) => {
 	const start = Date.now();
@@ -136,9 +104,11 @@ app.get("/:websiteSlug{[A-Za-z0-9_-]+}", async (c) => {
                             }).then(drainOrCancel),
                         );
                     }
-                    if (redisValue?.link_id && redisValue?.user_id) {
-                        tasks.push(executeConvexMutation(c, redisValue.link_id, redisValue.user_id));
-                    }
+                    
+					if (redisValue?.link_id && redisValue?.user_id && redisValue?.is_active && !event.is_bot) {
+						tasks.push(performHealthCheck(c, destination, redisValue.link_id, redisValue.user_id, convex));
+					}
+                    
                     if (tasks.length) await Promise.allSettled(tasks);
                 } catch (error) {
                     log.error("Failed to send analytics (cache hit)", { source: "cache", error: String(error) });
@@ -200,9 +170,11 @@ app.get("/:websiteSlug{[A-Za-z0-9_-]+}", async (c) => {
 						);
 					}
 					const { link_id: linkId, user_id: userId } = redisResult.redisValue;
-					if (linkId && userId) {
-						tasks.push(executeConvexMutation(c, linkId, userId));
+					
+					if (linkId && userId && redisResult.redisValue.is_active && !event.is_bot) {
+						tasks.push(performHealthCheck(c, url.toString(), linkId, userId, convex));
 					}
+					
 					if (tasks.length) await Promise.allSettled(tasks);
 				} catch (error) {
 					log.error("Failed to send analytics (cache miss)", { source: "redis", error: String(error) });
