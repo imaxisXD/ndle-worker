@@ -356,7 +356,7 @@ async function executeConvexWrites(
 			urlId,
 			userId,
 			urlStatusCode: healthCheckData?.responseStatus ?? 0,
-			urlStatusMessage: healthCheckData?.errorMessage ?? "",
+			urlStatusMessage: healthCheckData?.healthStatus ?? "",
 		}).catch(err => {
 			log.warn("Analytics mutation failed", { urlId, userId, error: String(err) });
 			throw err;
