@@ -51,7 +51,7 @@ function buildCacheableRedirectResponse(location: URL): Response {
         status: 301,
         headers: new Headers({
             Location: location.toString(),
-            "Cache-Control": `public, max-age=${MAX_AGE_SECONDS}`,
+            "Cache-Control": "no-store",
             "Content-Type": "text/plain; charset=utf-8",
         }),
     });
