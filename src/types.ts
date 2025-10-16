@@ -57,6 +57,7 @@ export type AnalyticsEventInput = Omit<AnalyticsEvent, "occurred_at" |
 };
 
 export type Bindings = {
+	CONVEX_URL: string;
 	UPSTASH_REDIS_REST_TOKEN: string;
 	UPSTASH_REDIS_REST_URL: string;
 	ANALYTICS_ENDPOINT?: string;

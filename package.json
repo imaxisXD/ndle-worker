@@ -2,8 +2,9 @@
   "name": "worker",
   "type": "module",
   "scripts": {
-    "dev": "wrangler dev",
-    "deploy": "wrangler deploy --minify",
+    "dev": "wrangler dev --env dev",
+    "deploy:dev": "wrangler deploy --env dev --minify",
+    "deploy:prod": "wrangler deploy --env=\"\" --minify",
     "cf-typegen": "wrangler types --env-interface CloudflareBindings"
   },
   "dependencies": {

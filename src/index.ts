@@ -16,17 +16,19 @@ import { createRequestLogger, type RequestLogger } from "./log";
 import { ConvexHttpClient } from "convex/browser";
 
 type Bindings = EnvBindings;
-const convexAddress = "https://tame-sparrow-238.convex.cloud";
-
 
 const app = new Hono<{ Bindings: Bindings }>();
-const convex = new ConvexHttpClient(convexAddress);
+
+function createConvexClient(convexUrl: string): ConvexHttpClient {
+	return new ConvexHttpClient(convexUrl);
+}
 
 
 app.get("/favicon.ico", () => buildNoContentResponse());
 app.get("/apple-touch-icon.png", () => buildNoContentResponse());
 app.get("/apple-touch-icon-precomposed.png", () => buildNoContentResponse());
 app.get("/apple-touch-icon-:variant.png", () => buildNoContentResponse());
+
 app.get("/:filename{[^/]+\\.[a-zA-Z0-9]+}", () =>
 	new Response("Not found", {
 		status: 404,
@@ -73,6 +75,9 @@ app.get("/:websiteSlug{[A-Za-z0-9_-]+}", async (c) => {
 	}
 	log.debug("Opening cache", { cache: "redirects" });
 	const cache = await caches.open("redirects");
+
+	// Create Convex client using environment variable
+	const convex = createConvexClient(c.env.CONVEX_URL);
 
     const cached = await checkCacheAndReturnElseSave(c, cache);
     if (cached) {

@@ -4,6 +4,8 @@
   "main": "src/index.ts",
   "compatibility_date": "2025-09-15",
   "workers_dev": false,
+  
+  // Production environment (default)
   "routes": [
     {
       "pattern": "ndle.im/*",
@@ -14,6 +16,32 @@
       "zone_name": "ndle.im"
     }
   ],
+  "vars": {
+    "CONVEX_URL": "https://cheery-starling-175.convex.cloud",
+    "WORKER_VERSION": "prod"
+  },
+  
+  // Development environment
+  "env": {
+    "dev": {
+      "name": "ndleworker-dev",
+      "routes": [
+        {
+          "pattern": "dev.ndle.im/*",
+          "zone_name": "ndle.im"
+        },
+        {
+          "pattern": "www.dev.ndle.im/*",
+          "zone_name": "ndle.im"
+        }
+      ],
+      "vars": {
+        "CONVEX_URL": "https://tame-sparrow-238.convex.cloud",
+        "WORKER_VERSION": "dev"
+      }
+    }
+  },
+  
   "observability": {
     "enabled": true,
     "head_sampling_rate": 1
