@@ -49,6 +49,7 @@ export type PublicApiType = {
         urlStatusCode: number;
         urlStatusMessage: string;
         userId: string;
+        requestId: string;
       },
       any
     >;

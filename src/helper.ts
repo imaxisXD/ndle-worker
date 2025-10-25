@@ -1,5 +1,6 @@
 import type { Context } from "hono";
 import type { AnalyticsEventInput, HealthStatus, RedisValueObject } from "./types";
+import { Redis } from "@upstash/redis/cloudflare";
 import { createRequestLogger } from "./log";
 import { api } from "./convex-api";
 import { ConvexHttpClient } from "convex/browser";
@@ -346,10 +347,21 @@ async function buildAnalyticsInput(
 
 	// Generate session ID based on IP hash and user agent
 	const sessionId = await generateSessionId(ipHash, userAgent);
-	
-	// For now, we'll assume each request is a first click of session
-	// In a production system, you'd want to track this in Redis or another store
-	const firstClickOfSession = true;
+
+	// Track first-click-of-session using Redis short-lived key
+	let firstClickOfSession = true;
+	try {
+		const redis = Redis.fromEnv(c.env);
+		const sessionKey = `session:${sessionId}:${slug}`;
+		const exists = await redis.exists(sessionKey);
+		firstClickOfSession = exists === 0;
+		if (firstClickOfSession) {
+			await redis.set(sessionKey, "1", { ex: 1800 });
+		}
+	} catch (err) {
+		const log = createRequestLogger(c, { component: "analytics" });
+		log.warn("Failed to evaluate first-click flag", { error: String(err) });
+	}
 
 	const utm_source = url.searchParams.get("utm_source") || redisValue?.utm_params?.utm_source || null;
 	const utm_medium = url.searchParams.get("utm_medium") || redisValue?.utm_params?.utm_medium || null;
@@ -499,27 +511,20 @@ async function executeConvexWrites(
 	}
 ) {
 	const log = createRequestLogger(c, { component: "convex" });
-	const tasks: Promise<unknown>[] = [];
+	const requestId = c.req.header("cf-ray") ?? c.req.header("x-request-id") ?? crypto.randomUUID();
 
-	// Always record analytics click count
-	tasks.push(
-		convex.mutation(api.urlAnalytics.mutateUrlAnalytics, {
+	try {
+		await convex.mutation(api.urlAnalytics.mutateUrlAnalytics, {
 			sharedSecret: c.env.SHARED_SECRET,
 			urlId,
 			userId,
 			urlStatusCode: healthCheckData?.responseStatus ?? 0,
 			urlStatusMessage: healthCheckData?.healthStatus ?? "",
-		}).catch(err => {
-			log.warn("Analytics mutation failed", { urlId, userId, error: String(err) });
-			throw err;
-		})
-	);
-
-	try {
-		await Promise.allSettled(tasks);
-		log.debug("Convex writes completed", { urlId, userId, healthCheckRecorded: !!healthCheckData });
+			requestId,
+		});
+		log.debug("Convex writes completed", { urlId, userId, healthCheckRecorded: !!healthCheckData, request_id: requestId });
 	} catch (err) {
-		log.warn("Some Convex writes failed", { urlId, userId, error: String(err) });
+		log.warn("Convex write failed", { urlId, userId, error: String(err), request_id: requestId });
 	}
 }
 

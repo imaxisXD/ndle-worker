@@ -18,6 +18,7 @@ import { ConvexHttpClient } from "convex/browser";
 type Bindings = EnvBindings;
 
 const app = new Hono<{ Bindings: Bindings }>();
+const slugWarmups = new Map<string, Promise<{ url: URL; redisValue: RedisValueObject } | undefined>>();
 
 function createConvexClient(convexUrl: string): ConvexHttpClient {
 	return new ConvexHttpClient(convexUrl);
@@ -64,16 +65,17 @@ app.get("/:websiteSlug{[A-Za-z0-9_-]+}", async (c) => {
 	const start = Date.now();
 	const slug = c.req.param("websiteSlug");
 	const log = createRequestLogger(c, { slug });
-	log.info("Incoming request");
+	const requestId = c.req.header("cf-ray") ?? c.req.header("x-request-id") ?? crypto.randomUUID();
+	log.info("Incoming request", { request_id: requestId });
 	if (!slug) {
-		log.warn("Missing slug in path");
+		log.warn("Missing slug in path", { request_id: requestId });
 		return c.text("Not found", 404);
 	}
 	if (c.req.method !== "GET") {
-		log.warn("Blocked non-GET request", { method: c.req.method });
+		log.warn("Blocked non-GET request", { method: c.req.method, request_id: requestId });
 		return c.text("Method not allowed", 405);
 	}
-	log.debug("Opening cache", { cache: "redirects" });
+	log.debug("Opening cache", { cache: "redirects", request_id: requestId });
 	const cache = await caches.open("redirects");
 
 	// Create Convex client using environment variable
@@ -100,7 +102,7 @@ app.get("/:websiteSlug{[A-Za-z0-9_-]+}", async (c) => {
                     const event = await buildAnalyticsInput(c, destination, slug, redirectLatency, redisValue);
                     const tasks: Promise<unknown>[] = [];
                     if (c.env.ANALYTICS_ENDPOINT && c.env.ANALYTICS_TOKEN) {
-                        log.info("Sending analytics (cache hit)", { source: "cache" });
+                        log.info("Sending analytics (cache hit)", { source: "cache", request_id: event.request_id });
                         tasks.push(
                             sendAnalyticsEvent({
                                 endpoint: c.env.ANALYTICS_ENDPOINT,
@@ -126,71 +128,91 @@ app.get("/:websiteSlug{[A-Za-z0-9_-]+}", async (c) => {
         return c.notFound();
     }
 
-	log.info("Cache miss — looking up in Redis");
-	const redisResult = await getUrlFromRedis(c, log.child({ component: "redis" }));
+    log.info("Cache miss — looking up in Redis", { request_id: requestId });
 
-	if (redisResult?.url) {
-		const url = redisResult.url;
-		c.executionCtx.waitUntil(
-			(async () => {
-				try {
-					const cacheRequest = makeCacheRequestFromContext(c);
-					const redirectResponse = buildCacheableRedirectResponse(url);
+    const existingWarmup = slugWarmups.get(slug);
+    let redisResult: { url: URL; redisValue: RedisValueObject } | undefined;
+    let startedWarmup = false;
 
-					log.info("Storing redirect in cache", { destination: url.toString() });
-					await cache.put(cacheRequest, redirectResponse);
+    if (existingWarmup) {
+        log.debug("Awaiting ongoing warmup", { request_id: requestId });
+        redisResult = await existingWarmup;
+    } else {
+        startedWarmup = true;
+        const warmupPromise = (async () => {
+            const result = await getUrlFromRedis(c, log.child({ component: "redis" }));
+            if (result?.url) {
+                try {
+                    const cacheRequest = makeCacheRequestFromContext(c);
+                    const redirectResponse = buildCacheableRedirectResponse(result.url);
 
-					log.info("Stored redirect in cache", { destination: url.toString() });
-				} catch (error) {
-					log.error(
-						"Failed to store in cache",
-						{ error: String(error) },
-					);
-				}
-			})(),
-		);
-		const response = buildClientRedirectResponse(url);
-		const redirectLatency = Date.now() - start;
-		log.info("Redirecting to destination", { source: "redis", destination: url.toString(), latency_ms: redirectLatency, status: 302 });
+                    log.info("Storing redirect in cache", { destination: result.url.toString(), request_id: requestId });
+                    await cache.put(cacheRequest, redirectResponse);
+                    log.info("Stored redirect in cache", { destination: result.url.toString(), request_id: requestId });
+                } catch (error) {
+                    log.error("Failed to store in cache", { error: String(error), request_id: requestId });
+                }
+            }
+            return result;
+        })()
+            .finally(() => {
+                slugWarmups.delete(slug);
+            });
 
-		c.executionCtx.waitUntil(
-			(async () => {
-				try {
-					const event = await buildAnalyticsInput(
-						c,
-						url.toString(),
-						slug,
-						redirectLatency,
-						redisResult.redisValue,
-					);
-					const tasks: Promise<unknown>[] = [];
-					if (c.env.ANALYTICS_ENDPOINT && c.env.ANALYTICS_TOKEN) {
-						log.info("Sending analytics (cache miss)", { source: "redis" });
-						tasks.push(
-							sendAnalyticsEvent({
-								endpoint: c.env.ANALYTICS_ENDPOINT,
-								token: c.env.ANALYTICS_TOKEN,
-								event,
-							}).then(drainOrCancel),
-						);
-					}
-					const { link_id: linkId, user_id: userId } = redisResult.redisValue;
-					
-					if (linkId && userId && redisResult.redisValue.is_active && !event.is_bot) {
-						tasks.push(performHealthCheck(c, url.toString(), linkId, userId, convex));
-					}
-					
-					if (tasks.length) await Promise.allSettled(tasks);
-				} catch (error) {
-					log.error("Failed to send analytics (cache miss)", { source: "redis", error: String(error) });
-				}
-			})(),
-		);
-		return response;
-	} else {
-		log.warn("Slug not found");
-		return c.notFound();
-	}
+        slugWarmups.set(slug, warmupPromise);
+        redisResult = await warmupPromise;
+    }
+
+    if (!redisResult?.url) {
+        log.warn("Slug not found", { request_id: requestId });
+        return c.notFound();
+    }
+
+    const url = redisResult.url;
+    const response = buildClientRedirectResponse(url);
+    const redirectLatency = Date.now() - start;
+
+    if (startedWarmup) {
+        log.info("Redirecting to destination", { source: "redis", destination: url.toString(), latency_ms: redirectLatency, status: 302, request_id: requestId });
+
+        c.executionCtx.waitUntil(
+            (async () => {
+                try {
+                    const event = await buildAnalyticsInput(
+                        c,
+                        url.toString(),
+                        slug,
+                        redirectLatency,
+                        redisResult!.redisValue,
+                    );
+                    const tasks: Promise<unknown>[] = [];
+                    if (c.env.ANALYTICS_ENDPOINT && c.env.ANALYTICS_TOKEN) {
+                        log.info("Sending analytics (cache miss)", { source: "redis", request_id: event.request_id });
+                        tasks.push(
+                            sendAnalyticsEvent({
+                                endpoint: c.env.ANALYTICS_ENDPOINT,
+                                token: c.env.ANALYTICS_TOKEN,
+                                event,
+                            }).then(drainOrCancel),
+                        );
+                    }
+                    const { link_id: linkId, user_id: userId } = redisResult!.redisValue;
+
+                    if (linkId && userId && redisResult!.redisValue.is_active && !event.is_bot) {
+                        tasks.push(performHealthCheck(c, url.toString(), linkId, userId, convex));
+                    }
+
+                    if (tasks.length) await Promise.allSettled(tasks);
+                } catch (error) {
+                    log.error("Failed to send analytics (cache miss)", { source: "redis", error: String(error) });
+                }
+            })(),
+        );
+    } else {
+        log.info("Redirecting to destination (warmup follower)", { source: "warmup", destination: url.toString(), latency_ms: redirectLatency, status: 302, request_id: requestId });
+    }
+
+    return response;
 });
 
 export default app;
