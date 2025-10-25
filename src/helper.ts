@@ -1,5 +1,4 @@
 import type { Context } from "hono";
-import { MAX_AGE_SECONDS } from "./const";
 import type { AnalyticsEventInput, HealthStatus, RedisValueObject } from "./types";
 import { createRequestLogger } from "./log";
 import { api } from "./convex-api";
@@ -41,6 +40,9 @@ function buildClientRedirectResponse(location: URL): Response {
             Pragma: "no-cache",
             Expires: "0",
             "Content-Type": "text/plain; charset=utf-8",
+            // Encourage browsers to send UA-CH on subsequent requests
+            "Accept-CH": "Sec-CH-UA, Sec-CH-UA-Platform, Sec-CH-UA-Mobile, Sec-CH-UA-Full-Version-List",
+            "Critical-CH": "Sec-CH-UA, Sec-CH-UA-Platform, Sec-CH-UA-Mobile, Sec-CH-UA-Full-Version-List",
         }),
     });
 }
@@ -53,6 +55,9 @@ function buildCacheableRedirectResponse(location: URL): Response {
             Location: location.toString(),
             "Cache-Control": "no-store",
             "Content-Type": "text/plain; charset=utf-8",
+            // Encourage browsers to send UA-CH on subsequent requests
+            "Accept-CH": "Sec-CH-UA, Sec-CH-UA-Platform, Sec-CH-UA-Mobile, Sec-CH-UA-Full-Version-List",
+            "Critical-CH": "Sec-CH-UA, Sec-CH-UA-Platform, Sec-CH-UA-Mobile, Sec-CH-UA-Full-Version-List",
         }),
     });
 }
@@ -101,18 +106,35 @@ function getBooleanEnv(value: string | undefined, defaultValue: boolean): boolea
 }
 
 /**
- * Coarse device type from User-Agent with mobile/tablet/desktop buckets.
+ * Coarse device type using UA-CH mobile hint first, else UA buckets.
  */
-function getDeviceType(userAgent: string): string | null {
-	if (!userAgent) return null;
-	const ua = userAgent.toLowerCase();
-	if (/(tablet|ipad|playbook|silk)|(android(?!.*mobi))/i.test(ua)) {
-		return "tablet";
-	}
-	if (/mobile|iphone|ipod|android|blackberry|opera mini|opera mobi|skyfire|maemo|windows phone|palm|iemobile|symbian|symbianos|fennec/i.test(ua)) {
-		return "mobile";
-	}
-	return "desktop";
+function getDeviceType(userAgent: string, secChUaMobile?: string | null): string | null {
+    // Prefer UA-CH: Sec-CH-UA-Mobile: ?1 => mobile, ?0 => not mobile
+    const mobileHint = (secChUaMobile ?? "").trim();
+    if (mobileHint) {
+        const normalized = mobileHint.replace(/\"|\?/g, "").trim();
+        if (normalized === "1") return "mobile";
+    }
+
+    if (!userAgent) return "Unknown";
+    const ua = userAgent.toLowerCase();
+
+    // Tablets
+    if (/(tablet|ipad|playbook|silk)|(android(?!.*mobi))/i.test(ua)) {
+        return "tablet";
+    }
+
+    // Mobiles
+    if (/mobile|iphone|ipod|android|blackberry|opera mini|opera mobi|skyfire|maemo|windows phone|palm|iemobile|symbian|symbianos|fennec/i.test(ua)) {
+        return "mobile";
+    }
+
+    // Desktops
+    if (/windows|macintosh|mac os x|linux|x11/i.test(ua)) {
+        return "desktop";
+    }
+
+    return "desktop";
 }
 
 /**
@@ -122,27 +144,54 @@ function getOS(userAgent: string, secChUaPlatform?: string | null): string | nul
 	// Prefer client hints if provided
 	const platform = (secChUaPlatform ?? "").replace(/"/g, "").trim();
 	if (platform && platform.toLowerCase() !== "unknown") {
+		// Normalize common platform names
+		const normalizedPlatform = platform.toLowerCase();
+		if (normalizedPlatform === "macos") return "macOS";
+		if (normalizedPlatform === "windows") return "Windows";
+		if (normalizedPlatform === "linux") return "Linux";
+		if (normalizedPlatform === "android") return "Android";
+		if (normalizedPlatform === "ios") return "iOS";
 		return platform;
 	}
 
-	// Fallback to coarse UA parsing
-	if (!userAgent) return null;
+	// Fallback to UA parsing
+	if (!userAgent) return "Unknown";
 	const ua = userAgent.toLowerCase();
 
-	// iOS devices
+	// iOS devices (check first to avoid false positives)
 	if (/iphone|ipad|ipod/.test(ua)) return "iOS";
-	// Android before Linux check
+	// Android (check before Linux)
 	if (/android/.test(ua)) return "Android";
 	// ChromeOS
 	if (/cros\s/.test(ua)) return "ChromeOS";
-	// Windows
-	if (/windows nt/.test(ua) || /windows/.test(ua)) return "Windows";
-	// macOS (exclude iOS which is already returned)
+	// Windows (more specific patterns first)
+	if (/windows nt \d+\.\d+/.test(ua)) {
+		if (/windows nt 10\.0/.test(ua)) return "Windows 10";
+		if (/windows nt 6\.3/.test(ua)) return "Windows 8.1";
+		if (/windows nt 6\.2/.test(ua)) return "Windows 8";
+		if (/windows nt 6\.1/.test(ua)) return "Windows 7";
+		return "Windows";
+	}
+	if (/windows/.test(ua)) return "Windows";
+	// macOS (more specific patterns)
+	if (/mac os x \d+_\d+/.test(ua)) {
+		// Extract version for more specific macOS detection
+		const match = ua.match(/mac os x (\d+)_(\d+)/);
+		if (match) {
+			const major = parseInt(match[1]);
+			const minor = parseInt(match[2]);
+			if (major >= 12) return "macOS Monterey+";
+			if (major >= 11) return "macOS Big Sur+";
+			if (major >= 10 && minor >= 15) return "macOS Catalina+";
+		}
+		return "macOS";
+	}
 	if (/mac os x|macintosh/.test(ua)) return "macOS";
 	// Generic Linux (exclude Android which is already returned)
 	if (/linux/.test(ua)) return "Linux";
 
-	return null;
+	// If we have a user agent but can't identify the OS, return "Unknown"
+	return "Unknown";
 }
 
 /**
@@ -170,6 +219,99 @@ function isBot(userAgent: string, cf?: any): boolean {
 }
 
 /**
+ * Parse browser name from sec-ch-ua header or user agent
+ */
+function getBrowser(userAgent: string, secChUa?: string | null): string | null {
+	// 1) Try to parse from UA Client Hints (brand list). This may contain multiple brands.
+	const header = (secChUa ?? "").trim();
+	if (header) {
+		const brandRegex = /"([^\"]+)";v="[^"]+"/g;
+		const brands: string[] = [];
+		let match: RegExpExecArray | null;
+		while ((match = brandRegex.exec(header)) !== null) {
+			brands.push(match[1]);
+		}
+		// Filter out the generic NotA_Brand marker
+		const filtered = brands.filter((b) => !/not\??a_brand/i.test(b));
+		// Priority map for known brands from UA-CH
+		const normalize = (b: string): string | null => {
+			if (/brave/i.test(b)) return "Brave";
+			if (/microsoft edge/i.test(b)) return "Edge";
+			if (/edge/i.test(b)) return "Edge";
+			if (/opera/i.test(b)) return "Opera";
+			if (/vivaldi/i.test(b)) return "Vivaldi";
+			if (/google chrome/i.test(b)) return "Chrome";
+			if (/chrome/i.test(b)) return "Chrome";
+			if (/chromium/i.test(b)) return "Chrome";
+			if (/firefox/i.test(b)) return "Firefox";
+			if (/safari/i.test(b)) return "Safari";
+			if (/samsung internet/i.test(b)) return "Samsung Internet";
+			return null;
+		};
+		const knownOrder = [
+			"Brave",
+			"Edge",
+			"Opera",
+			"Vivaldi",
+			"Chrome",
+			"Firefox",
+			"Safari",
+			"Samsung Internet",
+		];
+		const normalizedSet = new Set<string>();
+		for (const b of filtered) {
+			const n = normalize(b);
+			if (n) normalizedSet.add(n);
+		}
+		for (const candidate of knownOrder) {
+			if (normalizedSet.has(candidate)) return candidate;
+		}
+		// If we saw a brand but couldn't normalize, return the first as-is
+		if (filtered.length > 0) return filtered[0];
+	}
+
+	// 2) Fallback to User-Agent parsing
+	if (!userAgent) return "Unknown";
+	const ua = userAgent.toLowerCase();
+
+	// iOS-specific tokens to avoid Safari false positives
+	if (/crios\//.test(ua)) return "Chrome"; // Chrome on iOS
+	if (/fxios\//.test(ua)) return "Firefox"; // Firefox on iOS
+	if (/edgios\//.test(ua)) return "Edge"; // Edge on iOS
+
+	// Desktop/mobile tokens
+	if (ua.includes("brave")) return "Brave";
+	if (/edg\//.test(ua) || /edge\//.test(ua)) return "Edge";
+	if (/opr\//.test(ua) || /opera\//.test(ua)) return "Opera";
+	if (/vivaldi/.test(ua)) return "Vivaldi";
+	if (/samsungbrowser\//.test(ua)) return "Samsung Internet";
+	if (/duckduckgo/.test(ua)) return "DuckDuckGo";
+	if (/yabrowser/.test(ua)) return "Yandex";
+	if (/ucbrowser/.test(ua)) return "UC Browser";
+	if (/chrome\//.test(ua) && !/edg\//.test(ua) && !/opr\//.test(ua) && !/samsungbrowser\//.test(ua)) return "Chrome";
+	if (/safari\//.test(ua) && !/chrome\//.test(ua) && !/crios\//.test(ua) && !/fxios\//.test(ua) && !/edgios\//.test(ua) && !/opr\//.test(ua)) return "Safari";
+	if (/firefox\//.test(ua)) return "Firefox";
+	if (/msie/.test(ua) || /trident\//.test(ua)) return "Internet Explorer";
+
+	return "Unknown";
+}
+
+/**
+ * Generate a session ID based on IP hash and user agent
+ */
+async function generateSessionId(ipHash: string, userAgent: string): Promise<string> {
+	const sessionKey = `${ipHash}-${userAgent}`;
+	if (crypto.subtle) {
+		// Use crypto.subtle if available (more secure)
+		const hash = await sha256Hex(sessionKey);
+		return hash.substring(0, 16);
+	} else {
+		// Fallback for environments without crypto.subtle
+		return sessionKey.substring(0, 16);
+	}
+}
+
+/**
  * Build analytics event input mapped from Cloudflare Worker request/environment.
  */
 async function buildAnalyticsInput(
@@ -189,15 +331,25 @@ async function buildAnalyticsInput(
 	const ref = req.header("referer") ?? req.header("referrer") ?? null;
 
 	// Prefer client hints when available for device, else UA parsing
-	const deviceType = getDeviceType(userAgent);
-	const browser = req.header("sec-ch-ua") ?? null;
-	const os = getOS(userAgent, req.header("sec-ch-ua-platform") ?? null);
+    const deviceType = getDeviceType(userAgent, req.header("sec-ch-ua-mobile"));
+	const browser = getBrowser(
+		userAgent,
+		req.header("sec-ch-ua-full-version-list") ?? req.header("sec-ch-ua")
+	);
+	const os = getOS(userAgent, req.header("sec-ch-ua-platform"));
 	const requestId = req.header("cf-ray") ?? req.header("x-request-id") ?? crypto.randomUUID();
 	const ip = req.header("cf-connecting-ip") ?? req.header("x-forwarded-for") ?? "";
 	const ipHash = await sha256Hex(ip);
 	const languageHeader = req.header("accept-language") ?? null;
 	const language = languageHeader ? languageHeader.split(",")[0]?.trim() || null : null;
 	const trackingEnabled = getBooleanEnv(c.env.TRACKING_ENABLED, true);
+
+	// Generate session ID based on IP hash and user agent
+	const sessionId = await generateSessionId(ipHash, userAgent);
+	
+	// For now, we'll assume each request is a first click of session
+	// In a production system, you'd want to track this in Redis or another store
+	const firstClickOfSession = true;
 
 	const utm_source = url.searchParams.get("utm_source") || redisValue?.utm_params?.utm_source || null;
 	const utm_medium = url.searchParams.get("utm_medium") || redisValue?.utm_params?.utm_medium || null;
@@ -216,8 +368,8 @@ async function buildAnalyticsInput(
 		redirect_status: 301,
 		tracking_enabled: trackingEnabled,
 		latency_ms_worker: latencyMs,
-		session_id: null,
-		first_click_of_session: false,
+		session_id: sessionId,
+		first_click_of_session: firstClickOfSession,
 		request_id: requestId,
 		worker_datacenter: cf.colo ?? "",
 		worker_version: c.env.WORKER_VERSION ?? "dev",
@@ -480,6 +632,8 @@ export {
 	sha256Hex,
 	getBooleanEnv,
 	getDeviceType,
+	getBrowser,
+	getOS,
 	isBot,
 	buildAnalyticsInput,
 	determineHealthStatus,
