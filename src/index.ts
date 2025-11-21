@@ -111,6 +111,16 @@ app.get("/:websiteSlug{[A-Za-z0-9_-]+}", async (c) => {
                             }).then(drainOrCancel),
                         );
                     }
+                    if (c.env.API_SECRET) {
+                        log.info("Sending analytics to new endpoint (cache hit)", { source: "cache", request_id: event.request_id });
+                        tasks.push(
+                            sendAnalyticsEvent({
+                                endpoint: "https://ndle-ingest-api-production.up.railway.app/ingest",
+                                token: c.env.API_SECRET,
+                                event,
+                            }).then(drainOrCancel),
+                        );
+                    }
                     
 					if (redisValue?.link_id && redisValue?.user_id && redisValue?.is_active && !event.is_bot) {
 						tasks.push(performHealthCheck(c, destination, redisValue.link_id, redisValue.user_id, convex));
@@ -192,6 +202,16 @@ app.get("/:websiteSlug{[A-Za-z0-9_-]+}", async (c) => {
                             sendAnalyticsEvent({
                                 endpoint: c.env.ANALYTICS_ENDPOINT,
                                 token: c.env.ANALYTICS_TOKEN,
+                                event,
+                            }).then(drainOrCancel),
+                        );
+                    }
+                    if (c.env.API_SECRET) {
+                        log.info("Sending analytics to new endpoint (cache miss)", { source: "redis", request_id: event.request_id });
+                        tasks.push(
+                            sendAnalyticsEvent({
+                                endpoint: "https://ndle-ingest-api-production.up.railway.app/ingest",
+                                token: c.env.API_SECRET,
                                 event,
                             }).then(drainOrCancel),
                         );
