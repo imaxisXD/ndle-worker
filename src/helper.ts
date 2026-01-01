@@ -626,6 +626,24 @@ function buildNoContentResponse(status = 204, cacheSeconds = 31536000): Response
 	});
 }
 
+/**
+ * Append UTM parameters from Redis to the destination URL.
+ * Does not overwrite existing UTM params in the destination.
+ * @param destinationUrl - The destination URL to append UTM params to
+ * @param utmParams - Record of UTM params from Redis
+ * @returns New URL with UTM params appended
+ */
+function appendUtmParamsToUrl(destinationUrl: URL, utmParams: Record<string, string>): URL {
+	const url = new URL(destinationUrl.toString());
+	for (const [key, value] of Object.entries(utmParams)) {
+		// Only add if the param doesn't already exist in the destination URL
+		if (value && !url.searchParams.has(key)) {
+			url.searchParams.set(key, value);
+		}
+	}
+	return url;
+}
+
 
 
 export {
@@ -646,5 +664,6 @@ export {
 	executeConvexWrites,
 	performHealthCheck,
 	buildNoContentResponse,
+	appendUtmParamsToUrl,
 };
 

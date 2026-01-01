@@ -9,6 +9,7 @@ import {
 	buildNoContentResponse,
 	drainOrCancel,
 	performHealthCheck,
+	appendUtmParamsToUrl,
 } from "@helper";
 import { sendAnalyticsEvent } from "./analytics";
 import type { Bindings as EnvBindings, RedisValueObject } from "./types";
@@ -154,11 +155,16 @@ app.get("/:websiteSlug{[A-Za-z0-9_-]+}", async (c) => {
             if (result?.url) {
                 try {
                     const cacheRequest = makeCacheRequestFromContext(c);
-                    const redirectResponse = buildCacheableRedirectResponse(result.url);
+                    // Append UTM params to the URL before caching
+                    const utmParams = result.redisValue.utm_params ?? {};
+                    const finalUrl = Object.keys(utmParams).length > 0 
+                        ? appendUtmParamsToUrl(result.url, utmParams) 
+                        : result.url;
+                    const redirectResponse = buildCacheableRedirectResponse(finalUrl);
 
-                    log.info("Storing redirect in cache", { destination: result.url.toString(), request_id: requestId });
+                    log.info("Storing redirect in cache", { destination: finalUrl.toString(), request_id: requestId });
                     await cache.put(cacheRequest, redirectResponse);
-                    log.info("Stored redirect in cache", { destination: result.url.toString(), request_id: requestId });
+                    log.info("Stored redirect in cache", { destination: finalUrl.toString(), request_id: requestId });
                 } catch (error) {
                     log.error("Failed to store in cache", { error: String(error), request_id: requestId });
                 }
@@ -179,7 +185,12 @@ app.get("/:websiteSlug{[A-Za-z0-9_-]+}", async (c) => {
     }
 
     const url = redisResult.url;
-    const response = buildClientRedirectResponse(url);
+    // Append UTM params from Redis to the destination URL
+    const utmParams = redisResult.redisValue.utm_params ?? {};
+    const finalUrl = Object.keys(utmParams).length > 0 
+        ? appendUtmParamsToUrl(url, utmParams) 
+        : url;
+    const response = buildClientRedirectResponse(finalUrl);
     const redirectLatency = Date.now() - start;
 
     if (startedWarmup) {
