@@ -50,6 +50,16 @@ export type PublicApiType = {
         urlStatusMessage: string;
         userId: string;
         requestId: string;
+        clickEvent?: {
+          linkSlug: string;
+          occurredAt: number;
+          country: string;
+          city?: string;
+          deviceType: string;
+          browser: string;
+          os: string;
+          referer?: string;
+        };
       },
       any
     >;

@@ -122,9 +122,21 @@ app.get("/:websiteSlug{[A-Za-z0-9_-]+}", async (c) => {
                             }).then(drainOrCancel),
                         );
                     }
-                    
+
+					// Send click and health check to Convex (single instance via CONVEX_URL)
 					if (redisValue?.link_id && redisValue?.user_id && redisValue?.is_active && !event.is_bot) {
-						tasks.push(performHealthCheck(c, destination, redisValue.link_id, redisValue.user_id, convex));
+						// Build click event data
+						const clickEvent = {
+							linkSlug: slug,
+							occurredAt: Date.now(),
+							country: event.country || 'Unknown',
+							city: event.city ?? undefined,
+							deviceType: event.device_type || 'desktop',
+							browser: event.browser || 'Unknown',
+							os: event.os || 'Unknown',
+							referer: event.referer ?? undefined,
+						};
+						tasks.push(performHealthCheck(c, destination, redisValue.link_id, redisValue.user_id, convex, clickEvent));
 					}
                     
                     if (tasks.length) await Promise.allSettled(tasks);
@@ -227,10 +239,23 @@ app.get("/:websiteSlug{[A-Za-z0-9_-]+}", async (c) => {
                             }).then(drainOrCancel),
                         );
                     }
+
+                    // Send click and health check to Convex (single instance via CONVEX_URL)
                     const { link_id: linkId, user_id: userId } = redisResult!.redisValue;
 
                     if (linkId && userId && redisResult!.redisValue.is_active && !event.is_bot) {
-                        tasks.push(performHealthCheck(c, url.toString(), linkId, userId, convex));
+                        // Build click event data
+                        const clickEvent = {
+                            linkSlug: slug,
+                            occurredAt: Date.now(),
+                            country: event.country || 'Unknown',
+                            city: event.city ?? undefined,
+                            deviceType: event.device_type || 'desktop',
+                            browser: event.browser || 'Unknown',
+                            os: event.os || 'Unknown',
+                            referer: event.referer ?? undefined,
+                        };
+                        tasks.push(performHealthCheck(c, url.toString(), linkId, userId, convex, clickEvent));
                     }
 
                     if (tasks.length) await Promise.allSettled(tasks);

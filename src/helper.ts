@@ -495,6 +495,7 @@ async function drainOrCancel(res: Response) {
  * @param userId - The user ID
  * @param convex - The Convex client
  * @param healthCheckData - Optional health check data to record
+ * @param clickEvent - Optional click event data for real-time activity
  */
 async function executeConvexWrites(
 	c: Context, 
@@ -508,6 +509,16 @@ async function executeConvexWrites(
 		isHealthy: boolean;
 		healthStatus: HealthStatus;
 		errorMessage?: string;
+	},
+	clickEvent?: {
+		linkSlug: string;
+		occurredAt: number;
+		country: string;
+		city?: string;
+		deviceType: string;
+		browser: string;
+		os: string;
+		referer?: string;
 	}
 ) {
 	const log = createRequestLogger(c, { component: "convex" });
@@ -521,8 +532,9 @@ async function executeConvexWrites(
 			urlStatusCode: healthCheckData?.responseStatus ?? 0,
 			urlStatusMessage: healthCheckData?.healthStatus ?? "",
 			requestId,
+			clickEvent,
 		});
-		log.debug("Convex writes completed", { urlId, userId, healthCheckRecorded: !!healthCheckData, request_id: requestId });
+		log.debug("Convex writes completed", { urlId, userId, healthCheckRecorded: !!healthCheckData, clickEventRecorded: !!clickEvent, request_id: requestId });
 	} catch (err) {
 		log.warn("Convex write failed", { urlId, userId, error: String(err), request_id: requestId });
 	}
@@ -536,13 +548,24 @@ async function executeConvexWrites(
  * @param urlId - The URL ID
  * @param userId - The user ID
  * @param convex - The Convex client
+ * @param clickEvent - Optional click event data for real-time activity
  */
-async function performHealthCheck(
+export async function performHealthCheck(
 	c: Context, 
 	destinationUrl: string, 
 	urlId: string, 
 	userId: string,
-	convex: ConvexHttpClient
+	convex: ConvexHttpClient,
+	clickEvent?: {
+		linkSlug: string;
+		occurredAt: number;
+		country: string;
+		city?: string;
+		deviceType: string;
+		browser: string;
+		os: string;
+		referer?: string;
+	}
 ) {
 	const log = createRequestLogger(c, { component: "health-check" });
 	const startTime = Date.now();
@@ -566,14 +589,14 @@ async function performHealthCheck(
 		
 		const { status: healthStatus, isHealthy } = determineHealthStatus(response, responseTime, null);
 		
-		// Record both analytics and health check data
+		// Record both analytics and health check data (and click event if provided)
 		await executeConvexWrites(c, urlId, userId, convex, {
 			destinationUrl,
 			responseStatus: response.status,
 			responseTimeMs: responseTime,
 			isHealthy,
 			healthStatus,
-		});
+		}, clickEvent);
 		
 		log.info("Health check completed", {
 			urlId,
@@ -662,7 +685,6 @@ export {
 	determineHealthStatus,
 	drainOrCancel,
 	executeConvexWrites,
-	performHealthCheck,
 	buildNoContentResponse,
 	appendUtmParamsToUrl,
 };
