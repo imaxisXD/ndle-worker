@@ -10,8 +10,10 @@ import {
 	drainOrCancel,
 	performHealthCheck,
 	appendUtmParamsToUrl,
+	sha256Hex,
 } from "@helper";
 import { sendAnalyticsEvent } from "./analytics";
+import { resolveABTest } from "./ab-testing";
 import type { Bindings as EnvBindings, RedisValueObject } from "./types";
 import { createRequestLogger, type RequestLogger } from "./log";
 import { ConvexHttpClient } from "convex/browser";
@@ -197,26 +199,61 @@ app.get("/:websiteSlug{[A-Za-z0-9_-]+}", async (c) => {
     }
 
     const url = redisResult.url;
+    const redisValue = redisResult.redisValue;
+    
+    // Check for A/B testing
+    let finalDestination = url;
+    let variantId: string | null = null;
+    
+    const abConfig = redisValue.rules?.ab_test;
+    if (abConfig?.enabled && abConfig.variants?.length) {
+        // Generate session ID for deterministic assignment
+        const userAgent = c.req.header("user-agent") ?? "";
+        const ip = c.req.header("cf-connecting-ip") ?? c.req.header("x-forwarded-for") ?? "";
+        const ipHash = await sha256Hex(ip);
+        const sessionId = `${ipHash}-${userAgent}`.substring(0, 32);
+        
+        const abResult = resolveABTest(abConfig, sessionId);
+        
+        if (abResult) {
+            try {
+                finalDestination = new URL(abResult.url);
+                variantId = abResult.variantId;
+                log.info("A/B test active", { 
+                    variantId, 
+                    destination: abResult.url,
+                    totalVariants: abConfig.variants.length 
+                });
+            } catch (e) {
+                log.warn("Invalid A/B variant URL, using default", { 
+                    variantUrl: abResult.url,
+                    error: String(e)
+                });
+            }
+        }
+    }
+    
     // Append UTM params from Redis to the destination URL
-    const utmParams = redisResult.redisValue.utm_params ?? {};
+    const utmParams = redisValue.utm_params ?? {};
     const finalUrl = Object.keys(utmParams).length > 0 
-        ? appendUtmParamsToUrl(url, utmParams) 
-        : url;
+        ? appendUtmParamsToUrl(finalDestination, utmParams) 
+        : finalDestination;
     const response = buildClientRedirectResponse(finalUrl);
     const redirectLatency = Date.now() - start;
 
     if (startedWarmup) {
-        log.info("Redirecting to destination", { source: "redis", destination: url.toString(), latency_ms: redirectLatency, status: 302, request_id: requestId });
+        log.info("Redirecting to destination", { source: "redis", destination: finalUrl.toString(), variantId, latency_ms: redirectLatency, status: 302, request_id: requestId });
 
         c.executionCtx.waitUntil(
             (async () => {
                 try {
                     const event = await buildAnalyticsInput(
                         c,
-                        url.toString(),
+                        finalUrl.toString(),
                         slug,
                         redirectLatency,
-                        redisResult!.redisValue,
+                        redisValue,
+                        variantId,
                     );
                     const tasks: Promise<unknown>[] = [];
                     if (c.env.ANALYTICS_ENDPOINT && c.env.ANALYTICS_TOKEN) {
@@ -241,9 +278,9 @@ app.get("/:websiteSlug{[A-Za-z0-9_-]+}", async (c) => {
                     }
 
                     // Send click and health check to Convex (single instance via CONVEX_URL)
-                    const { link_id: linkId, user_id: userId } = redisResult!.redisValue;
+                    const { link_id: linkId, user_id: userId } = redisValue;
 
-                    if (linkId && userId && redisResult!.redisValue.is_active && !event.is_bot) {
+                    if (linkId && userId && redisValue.is_active && !event.is_bot) {
                         // Build click event data
                         const clickEvent = {
                             linkSlug: slug,
@@ -255,7 +292,7 @@ app.get("/:websiteSlug{[A-Za-z0-9_-]+}", async (c) => {
                             os: event.os || 'Unknown',
                             referer: event.referer ?? undefined,
                         };
-                        tasks.push(performHealthCheck(c, url.toString(), linkId, userId, convex, clickEvent));
+                        tasks.push(performHealthCheck(c, finalUrl.toString(), linkId, userId, convex, clickEvent));
                     }
 
                     if (tasks.length) await Promise.allSettled(tasks);
@@ -265,7 +302,7 @@ app.get("/:websiteSlug{[A-Za-z0-9_-]+}", async (c) => {
             })(),
         );
     } else {
-        log.info("Redirecting to destination (warmup follower)", { source: "warmup", destination: url.toString(), latency_ms: redirectLatency, status: 302, request_id: requestId });
+        log.info("Redirecting to destination (warmup follower)", { source: "warmup", destination: finalUrl.toString(), variantId, latency_ms: redirectLatency, status: 302, request_id: requestId });
     }
 
     return response;

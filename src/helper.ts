@@ -321,6 +321,7 @@ async function buildAnalyticsInput(
 	slug: string,
 	latencyMs: number,
 	redisValue?: RedisValueObject | null,
+	variantId?: string | null,
 ): Promise<AnalyticsEventInput> {
 	const req = c.req;
 	const raw = req.raw as Request & { cf?: any };
@@ -402,6 +403,7 @@ async function buildAnalyticsInput(
 		is_bot: isBot(userAgent, cf),
 		language,
 		timezone: cf.timezone ?? null,
+		variant_id: variantId ?? null,
 	};
 }
 

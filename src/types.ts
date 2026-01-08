@@ -31,12 +31,13 @@ export type AnalyticsEvent = {
 	is_bot: boolean;
 	language: string | null;
 	timezone: string | null;
+	variant_id: string | null; // A/B test variant ID
 };
 
 export type AnalyticsEventInput = Omit<AnalyticsEvent, "occurred_at" |
 	"link_id" | "user_id" | "session_id" | "device_type" | "browser" |
 	"os" | "region" | "city" | "referer" | "utm_source" | "utm_medium" |
-	"utm_campaign" | "utm_term" | "utm_content" | "language" | "timezone"> & {
+	"utm_campaign" | "utm_term" | "utm_content" | "language" | "timezone" | "variant_id"> & {
 	occurred_at: string | Date;
 	link_id?: string | null;
 	user_id?: string | null;
@@ -54,6 +55,7 @@ export type AnalyticsEventInput = Omit<AnalyticsEvent, "occurred_at" |
 	utm_content?: string | null;
 	language?: string | null;
 	timezone?: string | null;
+	variant_id?: string | null;
 };
 
 export type Bindings = {
@@ -69,6 +71,19 @@ export type Bindings = {
 	SHARED_SECRET?: string;
 };
 
+// A/B Testing types
+export type ABVariant = {
+	id: string;           // Unique variant ID ("control", "variant_a", etc.)
+	url: string;          // Destination URL for this variant
+	weight: number;       // Traffic percentage (0-100)
+};
+
+export type ABTestConfig = {
+	enabled: boolean;
+	variants: ABVariant[];
+	// Deterministic: same user always sees same variant
+	distribution: 'weighted_random' | 'deterministic';
+};
 
 export type HealthStatus = 
   | "healthy"
@@ -107,7 +122,11 @@ export type RedisValueObject = {
   max_clicks: number | null;
   tags: string[];
   utm_params: Record<string, string>;
-  rules: Record<string, unknown>;
+  rules: {
+    geo?: Record<string, string>;
+    device?: Record<string, string>;
+    ab_test?: ABTestConfig;
+  };
   features: {
     track_clicks: boolean;
     track_conversions: boolean;

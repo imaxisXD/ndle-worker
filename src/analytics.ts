@@ -41,6 +41,7 @@ export function normalizeAnalyticsEvent(input: AnalyticsEventInput): AnalyticsEv
 		is_bot: input.is_bot,
 		language: input.language ?? null,
 		timezone: input.timezone ?? null,
+		variant_id: input.variant_id ?? null,
 	};
 }
 
