@@ -87,22 +87,59 @@ app.get("/:websiteSlug{[A-Za-z0-9_-]+}", async (c) => {
     const cached = await checkCacheAndReturnElseSave(c, cache);
     if (cached) {
         const redirectLatency = Date.now() - start;
-        const destination = cached.headers.get("Location") || "";
-        log.info("Cache hit — using cached target but returning client redirect", { destination, latency_ms: redirectLatency, status: 302 });
+        let destination = cached.headers.get("Location") || "";
+        log.info("Cache hit — checking for A/B testing", { cachedDestination: destination, latency_ms: redirectLatency });
+
+        // For A/B testing, we need to fetch Redis to get the config and apply deterministic variant selection
+        // This ensures each user (IP+UA) sees the same variant, but different users see different variants
+        let redisValue: RedisValueObject | null = null;
+        let variantId: string | null = null;
+        
+        try {
+            const result = await getUrlFromRedis(c, log.child({ component: "redis" }));
+            redisValue = result?.redisValue ?? null;
+            
+            // Check for A/B testing and apply deterministic variant selection
+            const abConfig = redisValue?.rules?.ab_test;
+            if (abConfig?.enabled && abConfig.variants?.length) {
+                // Generate session ID for deterministic assignment (same user = same variant)
+                const userAgent = c.req.header("user-agent") ?? "";
+                const ip = c.req.header("cf-connecting-ip") ?? c.req.header("x-forwarded-for") ?? "";
+                const ipHash = await sha256Hex(ip);
+                const sessionId = `${ipHash}-${userAgent}`.substring(0, 32);
+                
+                const abResult = resolveABTest(abConfig, sessionId);
+                
+                if (abResult) {
+                    try {
+                        const variantUrl = new URL(abResult.url);
+                        // Apply UTM params to variant URL
+                        const utmParams = redisValue?.utm_params ?? {};
+                        destination = Object.keys(utmParams).length > 0 
+                            ? appendUtmParamsToUrl(variantUrl, utmParams).toString()
+                            : abResult.url;
+                        variantId = abResult.variantId;
+                        log.info("A/B test active (cache hit)", { 
+                            variantId, 
+                            destination,
+                            totalVariants: abConfig.variants.length 
+                        });
+                    } catch (e) {
+                        log.warn("Invalid A/B variant URL, using cached destination", { 
+                            variantUrl: abResult.url,
+                            error: String(e)
+                        });
+                    }
+                }
+            }
+        } catch (_err) {
+            log.warn("Redis lookup failed for A/B testing, using cached destination", { error: String(_err) });
+        }
 
         c.executionCtx.waitUntil(
             (async () => {
                 try {
-                    const destination = cached.headers.get("Location") || "";
-                    let redisValue: RedisValueObject | null = null;
-                    try {
-                        const result = await getUrlFromRedis(c, log.child({ component: "redis" }));
-                        redisValue = result?.redisValue ?? null;
-                    } catch (_err) {
-                        log.warn("Background Redis lookup failed", { error: String(_err) });
-                        redisValue = null;
-                    }
-                    const event = await buildAnalyticsInput(c, destination, slug, redirectLatency, redisValue);
+                    const event = await buildAnalyticsInput(c, destination, slug, redirectLatency, redisValue, variantId);
                     const tasks: Promise<unknown>[] = [];
                     if (c.env.ANALYTICS_ENDPOINT && c.env.ANALYTICS_TOKEN) {
                         log.info("Sending analytics (cache hit)", { source: "cache", request_id: event.request_id });
