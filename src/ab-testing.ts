@@ -6,16 +6,26 @@ import type { ABTestConfig, ABVariant } from "./types";
  */
 export function selectWeightedVariant(variants: ABVariant[]): ABVariant | null {
 	if (!variants.length) return null;
+	console.log(`[AB-DEBUG] Starting weighted selection. Variants: ${JSON.stringify(variants)}`);
 
-	const totalWeight = variants.reduce((sum, v) => sum + v.weight, 0);
-	if (totalWeight <= 0) return variants[0];
+	const totalWeight = variants.reduce((sum, v) => sum + Number(v.weight), 0);
+	console.log(`[AB-DEBUG] Total weight: ${totalWeight}`);
+	if (totalWeight <= 0) {
+		console.warn(`[AB-DEBUG] Total weight <= 0. Defaulting to first variant.`);
+		return variants[0];
+	}
 
 	const random = crypto.getRandomValues(new Uint32Array(1))[0] / 0xffffffff;
 	let threshold = random * totalWeight;
+	console.log(`[AB-DEBUG] Random: ${random}, Start Threshold: ${threshold}`);
 
 	for (const variant of variants) {
-		threshold -= variant.weight;
-		if (threshold <= 0) return variant;
+		threshold -= Number(variant.weight);
+		console.log(`[AB-DEBUG] Checking variant ${variant.id}. Weight: ${variant.weight}, New Threshold: ${threshold}`);
+		if (threshold <= 0) {
+			console.log(`[AB-DEBUG] Selected variant: ${variant.id}`);
+			return variant;
+		}
 	}
 
 	return variants[variants.length - 1];
@@ -31,6 +41,7 @@ export function selectDeterministicVariant(
 	sessionId: string,
 ): ABVariant | null {
 	if (!variants.length) return null;
+	console.log(`[AB-DEBUG] Starting deterministic selection. SessionId: ${sessionId}, Variants: ${JSON.stringify(variants)}`);
 
 	// Hash session ID to get consistent bucket
 	let hash = 0;
@@ -39,15 +50,21 @@ export function selectDeterministicVariant(
 		hash = hash & hash; // Convert to 32-bit integer
 	}
 
-	const totalWeight = variants.reduce((sum, v) => sum + v.weight, 0);
+	const totalWeight = variants.reduce((sum, v) => sum + Number(v.weight), 0);
+	console.log(`[AB-DEBUG] deterministic: Total weight: ${totalWeight}, Hash: ${hash}`);
 	if (totalWeight <= 0) return variants[0];
 
 	const bucket = Math.abs(hash) % totalWeight;
+	console.log(`[AB-DEBUG] Bucket: ${bucket}`);
 	let threshold = 0;
 
 	for (const variant of variants) {
-		threshold += variant.weight;
-		if (bucket < threshold) return variant;
+		threshold += Number(variant.weight);
+		console.log(`[AB-DEBUG] Checking variant ${variant.id}. Weight: ${variant.weight}, Threshold: ${threshold}`);
+		if (bucket < threshold) {
+			console.log(`[AB-DEBUG] Selected variant: ${variant.id}`);
+			return variant;
+		}
 	}
 
 	return variants[variants.length - 1];
