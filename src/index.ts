@@ -163,7 +163,7 @@ app.get("/:websiteSlug{[A-Za-z0-9_-]+}", async (c) => {
                     }
 
 					// Send click and health check to Convex (single instance via CONVEX_URL)
-					if (redisValue?.link_id && redisValue?.user_id && redisValue?.is_active && !event.is_bot) {
+					if (redisValue?.link_id && redisValue?.is_active && !event.is_bot) {
 						// Build click event data
 						const clickEvent = {
 							linkSlug: slug,
@@ -175,7 +175,7 @@ app.get("/:websiteSlug{[A-Za-z0-9_-]+}", async (c) => {
 							os: event.os || 'Unknown',
 							referer: event.referer ?? undefined,
 						};
-						tasks.push(performHealthCheck(c, destination, redisValue.link_id, redisValue.user_id, convex, clickEvent));
+						tasks.push(performHealthCheck(c, destination, redisValue.link_id, convex, clickEvent));
 					}
                     
                     if (tasks.length) await Promise.allSettled(tasks);
@@ -315,9 +315,9 @@ app.get("/:websiteSlug{[A-Za-z0-9_-]+}", async (c) => {
                     }
 
                     // Send click and health check to Convex (single instance via CONVEX_URL)
-                    const { link_id: linkId, user_id: userId } = redisValue;
+                    const { link_id: linkId } = redisValue;
 
-                    if (linkId && userId && redisValue.is_active && !event.is_bot) {
+                    if (linkId && redisValue.is_active && !event.is_bot) {
                         // Build click event data
                         const clickEvent = {
                             linkSlug: slug,
@@ -329,7 +329,7 @@ app.get("/:websiteSlug{[A-Za-z0-9_-]+}", async (c) => {
                             os: event.os || 'Unknown',
                             referer: event.referer ?? undefined,
                         };
-                        tasks.push(performHealthCheck(c, finalUrl.toString(), linkId, userId, convex, clickEvent));
+                        tasks.push(performHealthCheck(c, finalUrl.toString(), linkId, convex, clickEvent));
                     }
 
                     if (tasks.length) await Promise.allSettled(tasks);

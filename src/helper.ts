@@ -376,7 +376,7 @@ async function buildAnalyticsInput(
 		link_slug: slug,
 		short_url: shortUrl,
 		link_id: redisValue?.link_id ?? null,
-		user_id: redisValue?.user_id ?? null,
+		user_id: redisValue?.analytics_owner_key ?? redisValue?.user_id ?? null,
 		destination_url: destinationUrl,
 		redirect_status: 301,
 		tracking_enabled: trackingEnabled,
@@ -494,7 +494,6 @@ async function drainOrCancel(res: Response) {
  * Execute combined Convex mutations for analytics and health checks
  * @param c - The context
  * @param urlId - The URL ID
- * @param userId - The user ID
  * @param convex - The Convex client
  * @param healthCheckData - Optional health check data to record
  * @param clickEvent - Optional click event data for real-time activity
@@ -502,7 +501,6 @@ async function drainOrCancel(res: Response) {
 async function executeConvexWrites(
 	c: Context, 
 	urlId: string, 
-	userId: string, 
 	convex: ConvexHttpClient,
 	healthCheckData?: {
 		destinationUrl: string;
@@ -530,15 +528,40 @@ async function executeConvexWrites(
 		await convex.mutation(api.urlAnalytics.mutateUrlAnalytics, {
 			sharedSecret: c.env.SHARED_SECRET,
 			urlId,
-			userId,
 			urlStatusCode: healthCheckData?.responseStatus ?? 0,
 			urlStatusMessage: healthCheckData?.healthStatus ?? "",
 			requestId,
 			clickEvent,
 		});
-		log.debug("Convex writes completed", { urlId, userId, healthCheckRecorded: !!healthCheckData, clickEventRecorded: !!clickEvent, request_id: requestId });
+
+		if (healthCheckData) {
+			await convex.mutation(api.linkHealth.recordHealthCheck, {
+				sharedSecret: c.env.SHARED_SECRET,
+				urlId,
+				shortUrl: clickEvent?.linkSlug ?? "",
+				longUrl: healthCheckData.destinationUrl,
+				statusCode: healthCheckData.responseStatus,
+				latencyMs: healthCheckData.responseTimeMs,
+				isHealthy: healthCheckData.isHealthy,
+				healthStatus:
+					healthCheckData.healthStatus === "healthy"
+						? "up"
+						: healthCheckData.healthStatus === "slow"
+							? "degraded"
+							: "down",
+				errorMessage: healthCheckData.errorMessage,
+				checkedAt: Date.now(),
+			});
+		}
+
+		log.debug("Convex writes completed", {
+			urlId,
+			healthCheckRecorded: !!healthCheckData,
+			clickEventRecorded: !!clickEvent,
+			request_id: requestId,
+		});
 	} catch (err) {
-		log.warn("Convex write failed", { urlId, userId, error: String(err), request_id: requestId });
+		log.warn("Convex write failed", { urlId, error: String(err), request_id: requestId });
 	}
 }
 
@@ -548,7 +571,6 @@ async function executeConvexWrites(
  * @param c - The context
  * @param destinationUrl - The destination URL
  * @param urlId - The URL ID
- * @param userId - The user ID
  * @param convex - The Convex client
  * @param clickEvent - Optional click event data for real-time activity
  */
@@ -556,7 +578,6 @@ export async function performHealthCheck(
 	c: Context, 
 	destinationUrl: string, 
 	urlId: string, 
-	userId: string,
 	convex: ConvexHttpClient,
 	clickEvent?: {
 		linkSlug: string;
@@ -592,7 +613,7 @@ export async function performHealthCheck(
 		const { status: healthStatus, isHealthy } = determineHealthStatus(response, responseTime, null);
 		
 		// Record both analytics and health check data (and click event if provided)
-		await executeConvexWrites(c, urlId, userId, convex, {
+		await executeConvexWrites(c, urlId, convex, {
 			destinationUrl,
 			responseStatus: response.status,
 			responseTimeMs: responseTime,
@@ -617,7 +638,7 @@ export async function performHealthCheck(
 		const { status: healthStatus, isHealthy } = determineHealthStatus(null, responseTime, errorObj);
 		
 		// Record both analytics and health check data (with error)
-		await executeConvexWrites(c, urlId, userId, convex, {
+		await executeConvexWrites(c, urlId, convex, {
 			destinationUrl,
 			responseStatus: 0,
 			responseTimeMs: responseTime,
@@ -690,4 +711,3 @@ export {
 	buildNoContentResponse,
 	appendUtmParamsToUrl,
 };
-

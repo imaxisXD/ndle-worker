@@ -111,7 +111,9 @@ export type HealthCheckEvent = {
 
 export type RedisValueObject = {
   destination: string;
-  user_id: string;
+  user_id?: string | null;
+  analytics_owner_key?: string | null;
+  convex_user_id?: string | null;
   tenant_id: string;
   redirect_type: number;
   created_at: number;

@@ -48,7 +48,6 @@ export type PublicApiType = {
         urlId: string;
         urlStatusCode: number;
         urlStatusMessage: string;
-        userId: string;
         requestId: string;
         clickEvent?: {
           linkSlug: string;
@@ -67,6 +66,25 @@ export type PublicApiType = {
       "query",
       "public",
       { urlSlug: string },
+      any
+    >;
+  };
+  linkHealth: {
+    recordHealthCheck: FunctionReference<
+      "mutation",
+      "public",
+      {
+        sharedSecret: string;
+        urlId: string;
+        shortUrl: string;
+        longUrl: string;
+        statusCode: number;
+        latencyMs: number;
+        isHealthy: boolean;
+        healthStatus: "up" | "down" | "degraded";
+        errorMessage?: string;
+        checkedAt: number;
+      },
       any
     >;
   };
