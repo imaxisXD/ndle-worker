@@ -18,6 +18,7 @@
   ],
   "vars": {
     "CONVEX_URL": "https://cheery-starling-175.convex.cloud",
+    "INGEST_ENDPOINT": "https://api.ndle.app/ingest",
     "WORKER_VERSION": "prod"
   },
   
@@ -37,6 +38,7 @@
       ],
       "vars": {
         "CONVEX_URL": "https://tame-sparrow-238.convex.cloud",
+        "INGEST_ENDPOINT": "https://api.ndle.app/ingest",
         "WORKER_VERSION": "dev"
       }
     }
