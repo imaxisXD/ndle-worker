@@ -64,6 +64,7 @@ export type Bindings = {
 	UPSTASH_REDIS_REST_URL: string;
 	ANALYTICS_ENDPOINT?: string;
 	ANALYTICS_TOKEN?: string;
+	INGEST_ENDPOINT?: string;
 	API_SECRET?: string;
 	WORKER_VERSION?: string;
 	TRACKING_ENABLED?: string;

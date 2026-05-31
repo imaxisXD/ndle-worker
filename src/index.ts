@@ -11,6 +11,7 @@ import {
 	performHealthCheck,
 	appendUtmParamsToUrl,
 	sha256Hex,
+	assertSafeDestinationUrl,
 } from "@helper";
 import { sendAnalyticsEvent } from "./analytics";
 import { resolveABTest } from "./ab-testing";
@@ -52,7 +53,7 @@ async function getUrlFromRedis(c: Context, log?: RequestLogger): Promise<{ url: 
 
 	if (value && value.destination) {
 		try {
-			const url = new URL(value.destination);
+			const url = assertSafeDestinationUrl(value.destination);
 			log?.info("Found destination in Redis", { slug, destination: url.toString() });
 			return { url, redisValue: value };
 		} catch (_err) {
@@ -112,7 +113,7 @@ app.get("/:websiteSlug{[A-Za-z0-9_-]+}", async (c) => {
                 
                 if (abResult) {
                     try {
-                        const variantUrl = new URL(abResult.url);
+                        const variantUrl = assertSafeDestinationUrl(abResult.url);
                         // Apply UTM params to variant URL
                         const utmParams = redisValue?.utm_params ?? {};
                         destination = Object.keys(utmParams).length > 0 
@@ -151,11 +152,11 @@ app.get("/:websiteSlug{[A-Za-z0-9_-]+}", async (c) => {
                             }).then(drainOrCancel),
                         );
                     }
-                    if (c.env.API_SECRET) {
+                    if (c.env.API_SECRET && c.env.INGEST_ENDPOINT) {
                         log.info("Sending analytics to new endpoint (cache hit)", { source: "cache", request_id: event.request_id });
                         tasks.push(
                             sendAnalyticsEvent({
-                                endpoint: "https://ndle-ingest-api-production.up.railway.app/ingest",
+                                endpoint: c.env.INGEST_ENDPOINT,
                                 token: c.env.API_SECRET,
                                 event,
                             }).then(drainOrCancel),
@@ -185,7 +186,7 @@ app.get("/:websiteSlug{[A-Za-z0-9_-]+}", async (c) => {
             })(),
         );
         if (destination) {
-            return buildClientRedirectResponse(new URL(destination));
+            return buildClientRedirectResponse(assertSafeDestinationUrl(destination));
         }
         return c.notFound();
     }
@@ -254,7 +255,7 @@ app.get("/:websiteSlug{[A-Za-z0-9_-]+}", async (c) => {
         
         if (abResult) {
             try {
-                finalDestination = new URL(abResult.url);
+                finalDestination = assertSafeDestinationUrl(abResult.url);
                 variantId = abResult.variantId;
                 log.info("A/B test active", { 
                     variantId, 
@@ -278,10 +279,9 @@ app.get("/:websiteSlug{[A-Za-z0-9_-]+}", async (c) => {
     const response = buildClientRedirectResponse(finalUrl);
     const redirectLatency = Date.now() - start;
 
-    if (startedWarmup) {
-        log.info("Redirecting to destination", { source: "redis", destination: finalUrl.toString(), variantId, latency_ms: redirectLatency, status: 302, request_id: requestId });
+    log.info("Redirecting to destination", { source: startedWarmup ? "redis" : "warmup", destination: finalUrl.toString(), variantId, latency_ms: redirectLatency, status: 302, request_id: requestId });
 
-        c.executionCtx.waitUntil(
+    c.executionCtx.waitUntil(
             (async () => {
                 try {
                     const event = await buildAnalyticsInput(
@@ -303,11 +303,11 @@ app.get("/:websiteSlug{[A-Za-z0-9_-]+}", async (c) => {
                             }).then(drainOrCancel),
                         );
                     }
-                    if (c.env.API_SECRET) {
+                    if (c.env.API_SECRET && c.env.INGEST_ENDPOINT) {
                         log.info("Sending analytics to new endpoint (cache miss)", { source: "redis", request_id: event.request_id });
                         tasks.push(
                             sendAnalyticsEvent({
-                                endpoint: "https://ndle-ingest-api-production.up.railway.app/ingest",
+                                endpoint: c.env.INGEST_ENDPOINT,
                                 token: c.env.API_SECRET,
                                 event,
                             }).then(drainOrCancel),
@@ -338,9 +338,6 @@ app.get("/:websiteSlug{[A-Za-z0-9_-]+}", async (c) => {
                 }
             })(),
         );
-    } else {
-        log.info("Redirecting to destination (warmup follower)", { source: "warmup", destination: finalUrl.toString(), variantId, latency_ms: redirectLatency, status: 302, request_id: requestId });
-    }
 
     return response;
 });

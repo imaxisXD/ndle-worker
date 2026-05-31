@@ -48,6 +48,78 @@ function buildClientRedirectResponse(location: URL): Response {
     });
 }
 
+function isPrivateIpv4(hostname: string): boolean {
+	const parts = hostname.split(".").map((part) => Number(part));
+	if (parts.length !== 4 || parts.some((part) => !Number.isInteger(part) || part < 0 || part > 255)) {
+		return true;
+	}
+	const [a, b] = parts;
+	return (
+		a === 0 ||
+		a === 10 ||
+		a === 127 ||
+		(a === 100 && b >= 64 && b <= 127) ||
+		(a === 169 && b === 254) ||
+		(a === 172 && b >= 16 && b <= 31) ||
+		(a === 192 && (b === 0 || b === 168)) ||
+		(a === 198 && (b === 18 || b === 19)) ||
+		a >= 224
+	);
+}
+
+function isPrivateIpv6(hostname: string): boolean {
+	const normalized = hostname.toLowerCase();
+	return (
+		normalized === "::" ||
+		normalized === "::1" ||
+		normalized.startsWith("fc") ||
+		normalized.startsWith("fd") ||
+		normalized.startsWith("fe80:") ||
+		normalized.startsWith("2001:db8:")
+	);
+}
+
+function assertSafeDestinationUrl(input: string | URL): URL {
+	const url = input instanceof URL ? new URL(input.toString()) : new URL(input);
+	if (url.protocol !== "https:" && url.protocol !== "http:") {
+		throw new Error("Unsupported destination protocol");
+	}
+	if (url.username || url.password) {
+		throw new Error("Destination URLs cannot include credentials");
+	}
+
+	const hostname = url.hostname.toLowerCase();
+	if (hostname === "localhost" || hostname.endsWith(".localhost")) {
+		throw new Error("Local destination hosts are blocked");
+	}
+	const isIpv4Literal = /^(\d{1,3}\.){3}\d{1,3}$/.test(hostname);
+	if (
+		(isIpv4Literal && isPrivateIpv4(hostname)) ||
+		(hostname.includes(":") && isPrivateIpv6(hostname))
+	) {
+		throw new Error("Private destination hosts are blocked");
+	}
+
+	return url;
+}
+
+async function safeFetchWithRedirects(input: string | URL, init: RequestInit, maxRedirects = 3): Promise<Response> {
+	let currentUrl = assertSafeDestinationUrl(input);
+	for (let redirectCount = 0; redirectCount <= maxRedirects; redirectCount++) {
+		const response = await fetch(currentUrl.toString(), {
+			...init,
+			redirect: "manual",
+		});
+		if (![301, 302, 303, 307, 308].includes(response.status)) {
+			return response;
+		}
+		const location = response.headers.get("location");
+		if (!location) return response;
+		currentUrl = assertSafeDestinationUrl(new URL(location, currentUrl));
+	}
+	throw new Error("Too many redirects");
+}
+
 // Cacheable variant for server-side Worker Cache storage
 function buildCacheableRedirectResponse(location: URL): Response {
     return new Response("", {
@@ -378,7 +450,7 @@ async function buildAnalyticsInput(
 		link_id: redisValue?.link_id ?? null,
 		user_id: redisValue?.analytics_owner_key ?? redisValue?.user_id ?? null,
 		destination_url: destinationUrl,
-		redirect_status: 301,
+		redirect_status: 302,
 		tracking_enabled: trackingEnabled,
 		latency_ms_worker: latencyMs,
 		session_id: sessionId,
@@ -597,17 +669,19 @@ export async function performHealthCheck(
 
 		const controller = new AbortController();
 		const timeoutId = setTimeout(() => controller.abort(), 8000);
-		
-		const response = await fetch(destinationUrl, {
-			method: 'HEAD',
-			signal: controller.signal,
-			headers: {
-				'User-Agent': 'NDLE-HealthCheck/1.0',
-				'Accept': '*/*',
-			},
-		});
-		
-		clearTimeout(timeoutId);
+		let response: Response;
+		try {
+			response = await safeFetchWithRedirects(destinationUrl, {
+				method: 'HEAD',
+				signal: controller.signal,
+				headers: {
+					'User-Agent': 'NDLE-HealthCheck/1.0',
+					'Accept': '*/*',
+				},
+			});
+		} finally {
+			clearTimeout(timeoutId);
+		}
 		const responseTime = Date.now() - startTime;
 		
 		const { status: healthStatus, isHealthy } = determineHealthStatus(response, responseTime, null);
@@ -645,7 +719,7 @@ export async function performHealthCheck(
 			isHealthy,
 			healthStatus,
 			errorMessage,
-		});
+		}, clickEvent);
 		
 		log.warn("Health check failed", {
 			urlId,
@@ -695,7 +769,7 @@ function appendUtmParamsToUrl(destinationUrl: URL, utmParams: Record<string, str
 export {
 	makeCacheKeyFromContext,
 	makeCacheRequestFromContext,
-    buildClientRedirectResponse,
+	buildClientRedirectResponse,
     buildCacheableRedirectResponse,
 	checkCacheAndReturnElseSave,
 	sha256Hex,
@@ -710,4 +784,6 @@ export {
 	executeConvexWrites,
 	buildNoContentResponse,
 	appendUtmParamsToUrl,
+	assertSafeDestinationUrl,
+	safeFetchWithRedirects,
 };
