@@ -47,6 +47,10 @@ app.get("/:filename{[^/]+\\.[a-zA-Z0-9]+}", () =>
  */
 async function getUrlFromRedis(c: Context, log?: RequestLogger): Promise<{ url: URL; redisValue: RedisValueObject } | undefined> {
 	const slug = c.req.param("websiteSlug");
+	if (!slug) {
+		log?.warn("Missing slug while looking up Redis");
+		return undefined;
+	}
 	const redis = Redis.fromEnv(c.env);
 	log?.debug("Looking up slug in Redis", { slug });
 	const value = await redis.json.get<RedisValueObject>(slug);
