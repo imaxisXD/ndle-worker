@@ -1,31 +1,9 @@
 import type { Context } from "hono";
-import type { AnalyticsEventInput, HealthStatus, RedisValueObject } from "./types";
+import type { AnalyticsEventInput, RedisValueObject } from "./types";
 import { Redis } from "@upstash/redis/cloudflare";
 import { createRequestLogger } from "./log";
 import { api } from "./convex-api";
 import { ConvexHttpClient } from "convex/browser";
-
-/**
- * Make a cache key from the context
- * @param c - The context
- * @returns The cache key
- */
-function makeCacheKeyFromContext(c: Context): string {
-	const url = new URL(c.req.url);
-	const origin = url.origin.toLowerCase();
-	const pathname = url.pathname.replace(/\/+$/, "") || "/";
-	return `${origin}${pathname}`;
-}
-
-/**
- * Make a cache request from the context
- * @param c - The context
- * @returns The cache request
- */
-function makeCacheRequestFromContext(c: Context): Request {
-	const cacheKey = makeCacheKeyFromContext(c);
-	return new Request(cacheKey, { method: "GET" });
-}
 
 /**
  * Build a redirect response
@@ -101,56 +79,6 @@ function assertSafeDestinationUrl(input: string | URL): URL {
 	}
 
 	return url;
-}
-
-async function safeFetchWithRedirects(input: string | URL, init: RequestInit, maxRedirects = 3): Promise<Response> {
-	let currentUrl = assertSafeDestinationUrl(input);
-	for (let redirectCount = 0; redirectCount <= maxRedirects; redirectCount++) {
-		const response = await fetch(currentUrl.toString(), {
-			...init,
-			redirect: "manual",
-		});
-		if (![301, 302, 303, 307, 308].includes(response.status)) {
-			return response;
-		}
-		const location = response.headers.get("location");
-		if (!location) return response;
-		currentUrl = assertSafeDestinationUrl(new URL(location, currentUrl));
-	}
-	throw new Error("Too many redirects");
-}
-
-// Cacheable variant for server-side Worker Cache storage
-function buildCacheableRedirectResponse(location: URL): Response {
-    return new Response("", {
-        status: 301,
-        headers: new Headers({
-            Location: location.toString(),
-            "Cache-Control": "no-store",
-            "Content-Type": "text/plain; charset=utf-8",
-            // Encourage browsers to send UA-CH on subsequent requests
-            "Accept-CH": "Sec-CH-UA, Sec-CH-UA-Platform, Sec-CH-UA-Mobile, Sec-CH-UA-Full-Version-List",
-            "Critical-CH": "Sec-CH-UA, Sec-CH-UA-Platform, Sec-CH-UA-Mobile, Sec-CH-UA-Full-Version-List",
-        }),
-    });
-}
-
-/**
- * Check the cache and return the response if it exists
- * @param c - The context
- * @param cache - The cache
- * @returns The cached response
- */
-async function checkCacheAndReturnElseSave(c: Context, cache: Cache) {
-	const cacheKey = makeCacheKeyFromContext(c);
-	const cacheRequest = new Request(cacheKey, { method: "GET" });
-
-	// Check for existing cached response first
-	const cachedResponse = await cache.match(cacheRequest);
-
-	if (cachedResponse) {
-		return cachedResponse;
-	}
 }
 
 /**
@@ -480,72 +408,6 @@ async function buildAnalyticsInput(
 }
 
 /**
- * Determine the health status of a response
- * @param response 
- * @param responseTime 
- * @param error 
- * @returns The health status and whether the response is healthy
- */
-
-function determineHealthStatus(
-	response: Response | null,
-	responseTime: number,
-	error: Error | null
-): { status: HealthStatus; isHealthy: boolean } {
-
-	if (error) {
-		const errorMessage = error.message.toLowerCase();
-		
-		if (errorMessage.includes('timeout') || errorMessage.includes('aborted')) {
-			return { status: "timeout", isHealthy: false };
-		}
-		if (errorMessage.includes('ssl') || errorMessage.includes('certificate')) {
-			return { status: "ssl_error", isHealthy: false };
-		}
-		if (errorMessage.includes('dns') || errorMessage.includes('name resolution')) {
-			return { status: "dns_error", isHealthy: false };
-		}
-		if (errorMessage.includes('network') || errorMessage.includes('connection')) {
-			return { status: "down", isHealthy: false };
-		}
-		return { status: "error", isHealthy: false };
-	}
-	
-
-	if (response) {
-		const status = response.status;
-		
-		if (status >= 300 && status < 400) {
-			const location = response.headers.get('location');
-			if (location && location.includes('redirect')) {
-				return { status: "redirect_loop", isHealthy: false };
-			}
-		}
-		
-		if (status >= 500) {
-			return { status: "down", isHealthy: false };
-		}
-		
-		if (status >= 400 && status < 500) {
-			return { status: "unstable", isHealthy: false };
-		}
-		
-		if (status >= 200 && status < 400) {
-			if (responseTime > 5000) {
-				return { status: "slow", isHealthy: false };
-			}
-			if (responseTime > 3000) {
-				return { status: "slow", isHealthy: true };
-			}
-			return { status: "healthy", isHealthy: true };
-		}
-	}
-	
-	return { status: "error", isHealthy: false };
-}
-
-
-/**
  * Drain or cancel a response
  * @param res - The response
  */
@@ -562,27 +424,11 @@ async function drainOrCancel(res: Response) {
 }
 
 
-/**
- * Execute combined Convex mutations for analytics and health checks
- * @param c - The context
- * @param urlId - The URL ID
- * @param convex - The Convex client
- * @param healthCheckData - Optional health check data to record
- * @param clickEvent - Optional click event data for real-time activity
- */
-async function executeConvexWrites(
-	c: Context, 
-	urlId: string, 
+async function recordClickInConvex(
+	c: Context,
+	urlId: string,
 	convex: ConvexHttpClient,
-	healthCheckData?: {
-		destinationUrl: string;
-		responseStatus: number;
-		responseTimeMs: number;
-		isHealthy: boolean;
-		healthStatus: HealthStatus;
-		errorMessage?: string;
-	},
-	clickEvent?: {
+	clickEvent: {
 		linkSlug: string;
 		occurredAt: number;
 		country: string;
@@ -591,7 +437,7 @@ async function executeConvexWrites(
 		browser: string;
 		os: string;
 		referer?: string;
-	}
+	},
 ) {
 	const log = createRequestLogger(c, { component: "convex" });
 	const requestId = c.req.header("cf-ray") ?? c.req.header("x-request-id") ?? crypto.randomUUID();
@@ -600,138 +446,21 @@ async function executeConvexWrites(
 		await convex.mutation(api.urlAnalytics.mutateUrlAnalytics, {
 			sharedSecret: c.env.SHARED_SECRET,
 			urlId,
-			urlStatusCode: healthCheckData?.responseStatus ?? 0,
-			urlStatusMessage: healthCheckData?.healthStatus ?? "",
+			urlStatusCode: 0,
+			urlStatusMessage: "",
 			requestId,
 			clickEvent,
 		});
 
-		if (healthCheckData) {
-			await convex.mutation(api.linkHealth.recordHealthCheck, {
-				sharedSecret: c.env.SHARED_SECRET,
-				urlId,
-				shortUrl: clickEvent?.linkSlug ?? "",
-				longUrl: healthCheckData.destinationUrl,
-				statusCode: healthCheckData.responseStatus,
-				latencyMs: healthCheckData.responseTimeMs,
-				isHealthy: healthCheckData.isHealthy,
-				healthStatus:
-					healthCheckData.healthStatus === "healthy"
-						? "up"
-						: healthCheckData.healthStatus === "slow"
-							? "degraded"
-							: "down",
-				errorMessage: healthCheckData.errorMessage,
-				checkedAt: Date.now(),
-			});
-		}
-
-		log.debug("Convex writes completed", {
+		log.debug("Click recorded in Convex", { urlId, request_id: requestId });
+	} catch (err) {
+		log.warn("Click write failed", {
 			urlId,
-			healthCheckRecorded: !!healthCheckData,
-			clickEventRecorded: !!clickEvent,
+			error: String(err),
 			request_id: requestId,
 		});
-	} catch (err) {
-		log.warn("Convex write failed", { urlId, error: String(err), request_id: requestId });
 	}
 }
-
-
-/**
- * Perform a health check
- * @param c - The context
- * @param destinationUrl - The destination URL
- * @param urlId - The URL ID
- * @param convex - The Convex client
- * @param clickEvent - Optional click event data for real-time activity
- */
-export async function performHealthCheck(
-	c: Context, 
-	destinationUrl: string, 
-	urlId: string, 
-	convex: ConvexHttpClient,
-	clickEvent?: {
-		linkSlug: string;
-		occurredAt: number;
-		country: string;
-		city?: string;
-		deviceType: string;
-		browser: string;
-		os: string;
-		referer?: string;
-	}
-) {
-	const log = createRequestLogger(c, { component: "health-check" });
-	const startTime = Date.now();
-	
-	try {
-
-		const controller = new AbortController();
-		const timeoutId = setTimeout(() => controller.abort(), 8000);
-		let response: Response;
-		try {
-			response = await safeFetchWithRedirects(destinationUrl, {
-				method: 'HEAD',
-				signal: controller.signal,
-				headers: {
-					'User-Agent': 'NDLE-HealthCheck/1.0',
-					'Accept': '*/*',
-				},
-			});
-		} finally {
-			clearTimeout(timeoutId);
-		}
-		const responseTime = Date.now() - startTime;
-		
-		const { status: healthStatus, isHealthy } = determineHealthStatus(response, responseTime, null);
-		
-		// Record both analytics and health check data (and click event if provided)
-		await executeConvexWrites(c, urlId, convex, {
-			destinationUrl,
-			responseStatus: response.status,
-			responseTimeMs: responseTime,
-			isHealthy,
-			healthStatus,
-		}, clickEvent);
-		
-		log.info("Health check completed", {
-			urlId,
-			destinationUrl,
-			status: response.status,
-			responseTime,
-			isHealthy,
-			healthStatus,
-		});
-		
-	} catch (error) {
-		const responseTime = Date.now() - startTime;
-		const errorMessage = error instanceof Error ? error.message : String(error);
-		const errorObj = error instanceof Error ? error : new Error(errorMessage);
-		
-		const { status: healthStatus, isHealthy } = determineHealthStatus(null, responseTime, errorObj);
-		
-		// Record both analytics and health check data (with error)
-		await executeConvexWrites(c, urlId, convex, {
-			destinationUrl,
-			responseStatus: 0,
-			responseTimeMs: responseTime,
-			isHealthy,
-			healthStatus,
-			errorMessage,
-		}, clickEvent);
-		
-		log.warn("Health check failed", {
-			urlId,
-			destinationUrl,
-			error: errorMessage,
-			responseTime,
-			isHealthy,
-			healthStatus,
-		});
-	}
-}
-
 
 /**
  * Build a no content response
@@ -767,11 +496,7 @@ function appendUtmParamsToUrl(destinationUrl: URL, utmParams: Record<string, str
 
 
 export {
-	makeCacheKeyFromContext,
-	makeCacheRequestFromContext,
 	buildClientRedirectResponse,
-    buildCacheableRedirectResponse,
-	checkCacheAndReturnElseSave,
 	sha256Hex,
 	getBooleanEnv,
 	getDeviceType,
@@ -779,11 +504,9 @@ export {
 	getOS,
 	isBot,
 	buildAnalyticsInput,
-	determineHealthStatus,
 	drainOrCancel,
-	executeConvexWrites,
+	recordClickInConvex,
 	buildNoContentResponse,
 	appendUtmParamsToUrl,
 	assertSafeDestinationUrl,
-	safeFetchWithRedirects,
 };

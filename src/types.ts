@@ -58,19 +58,18 @@ export type AnalyticsEventInput = Omit<AnalyticsEvent, "occurred_at" |
 	variant_id?: string | null;
 };
 
-export type Bindings = {
-	CONVEX_URL: string;
+type AppRuntimeBindings = {
 	UPSTASH_REDIS_REST_TOKEN: string;
 	UPSTASH_REDIS_REST_URL: string;
 	ANALYTICS_ENDPOINT?: string;
 	ANALYTICS_TOKEN?: string;
-	INGEST_ENDPOINT?: string;
 	API_SECRET?: string;
-	WORKER_VERSION?: string;
 	TRACKING_ENABLED?: string;
 	LOG_LEVEL?: string;
 	SHARED_SECRET?: string;
 };
+
+export type Bindings = CloudflareBindings & AppRuntimeBindings;
 
 // A/B Testing types
 export type ABVariant = {
