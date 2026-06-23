@@ -1,0 +1,10 @@
+allowBuilds:
+  esbuild: true
+  sharp: true
+  workerd: true
+overrides:
+  ws: 8.21.0
+onlyBuiltDependencies:
+  - esbuild
+  - sharp
+  - workerd

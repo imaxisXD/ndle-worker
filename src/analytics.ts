@@ -3,10 +3,13 @@ import type { AnalyticsEvent, AnalyticsEventInput } from "./types";
 /**
  * Normalize input into the exact payload the API expects.
  */
-export function normalizeAnalyticsEvent(input: AnalyticsEventInput): AnalyticsEvent {
-	const occurredAtIso = typeof input.occurred_at === "string"
-		? input.occurred_at
-		: input.occurred_at.toISOString();
+export function normalizeAnalyticsEvent(
+	input: AnalyticsEventInput,
+): AnalyticsEvent {
+	const occurredAtIso =
+		typeof input.occurred_at === "string"
+			? input.occurred_at
+			: input.occurred_at.toISOString();
 
 	return {
 		idempotency_key: input.idempotency_key,

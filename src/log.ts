@@ -15,7 +15,9 @@ function normalizeLevel(value: string | undefined): LogLevel {
 	return "info";
 }
 
-function formatHumanContext(fields: Record<string, unknown> | undefined): string {
+function formatHumanContext(
+	fields: Record<string, unknown> | undefined,
+): string {
 	if (!fields) return "";
 	const f = fields as Record<string, any>;
 	const parts: string[] = [];
@@ -40,7 +42,10 @@ export type RequestLogger = {
 	child: (extra: Record<string, unknown>) => RequestLogger;
 };
 
-export function createRequestLogger(c: Context, extra?: Record<string, unknown>): RequestLogger {
+export function createRequestLogger(
+	c: Context,
+	extra?: Record<string, unknown>,
+): RequestLogger {
 	const req = c.req;
 	const raw = req.raw as Request & { cf?: any };
 	const cf = raw.cf ?? {};
@@ -53,7 +58,11 @@ export function createRequestLogger(c: Context, extra?: Record<string, unknown>)
 		...extra,
 	};
 
-	function logAt(lvl: LogLevel, message: string, fields?: Record<string, unknown>) {
+	function logAt(
+		lvl: LogLevel,
+		message: string,
+		fields?: Record<string, unknown>,
+	) {
 		if (LEVEL_ORDER[lvl] < threshold) return;
 		const ts = new Date().toISOString();
 		const levelLabel = lvl.toUpperCase();
@@ -80,8 +89,7 @@ export function createRequestLogger(c: Context, extra?: Record<string, unknown>)
 		info: (m, f) => logAt("info", m, f),
 		warn: (m, f) => logAt("warn", m, f),
 		error: (m, f) => logAt("error", m, f),
-		child: (childExtra) => createRequestLogger(c, { ...baseFields, ...childExtra }),
+		child: (childExtra) =>
+			createRequestLogger(c, { ...baseFields, ...childExtra }),
 	};
 }
-
-

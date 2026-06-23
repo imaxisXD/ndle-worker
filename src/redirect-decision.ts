@@ -78,5 +78,5 @@ async function decideRedirect(params: {
 	};
 }
 
-export { decideRedirect };
 export type { RedirectDecision };
+export { decideRedirect };

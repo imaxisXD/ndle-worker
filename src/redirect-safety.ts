@@ -23,5 +23,5 @@ function getRedirectBlockReason(
 	}
 }
 
-export { getRedirectBlockReason };
 export type { RedirectBlockReason };
+export { getRedirectBlockReason };

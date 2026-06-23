@@ -34,10 +34,27 @@ export type AnalyticsEvent = {
 	variant_id: string | null; // A/B test variant ID
 };
 
-export type AnalyticsEventInput = Omit<AnalyticsEvent, "occurred_at" |
-	"link_id" | "user_id" | "session_id" | "device_type" | "browser" |
-	"os" | "region" | "city" | "referer" | "utm_source" | "utm_medium" |
-	"utm_campaign" | "utm_term" | "utm_content" | "language" | "timezone" | "variant_id"> & {
+export type AnalyticsEventInput = Omit<
+	AnalyticsEvent,
+	| "occurred_at"
+	| "link_id"
+	| "user_id"
+	| "session_id"
+	| "device_type"
+	| "browser"
+	| "os"
+	| "region"
+	| "city"
+	| "referer"
+	| "utm_source"
+	| "utm_medium"
+	| "utm_campaign"
+	| "utm_term"
+	| "utm_content"
+	| "language"
+	| "timezone"
+	| "variant_id"
+> & {
 	occurred_at: string | Date;
 	link_id?: string | null;
 	user_id?: string | null;
@@ -73,68 +90,68 @@ export type Bindings = CloudflareBindings & AppRuntimeBindings;
 
 // A/B Testing types
 export type ABVariant = {
-	id: string;           // Unique variant ID ("control", "variant_a", etc.)
-	url: string;          // Destination URL for this variant
-	weight: number;       // Traffic percentage (0-100)
+	id: string; // Unique variant ID ("control", "variant_a", etc.)
+	url: string; // Destination URL for this variant
+	weight: number; // Traffic percentage (0-100)
 };
 
 export type ABTestConfig = {
 	enabled: boolean;
 	variants: ABVariant[];
 	// Deterministic: same user always sees same variant
-	distribution: 'weighted_random' | 'deterministic';
+	distribution: "weighted_random" | "deterministic";
 };
 
-export type HealthStatus = 
-  | "healthy"
-  | "slow" 
-  | "unstable"
-  | "down"
-  | "timeout"
-  | "error"
-  | "redirect_loop"
-  | "ssl_error"
-  | "dns_error";
+export type HealthStatus =
+	| "healthy"
+	| "slow"
+	| "unstable"
+	| "down"
+	| "timeout"
+	| "error"
+	| "redirect_loop"
+	| "ssl_error"
+	| "dns_error";
 
 export type HealthCheckEvent = {
-  url_id: string;
-  destination_url: string;
-  check_timestamp: string;
-  response_status: number;
-  response_time_ms: number;
-  is_healthy: boolean;
-  health_status: HealthStatus;
-  error_message?: string;
-  worker_datacenter: string;
-  worker_version: string;
+	url_id: string;
+	destination_url: string;
+	check_timestamp: string;
+	response_status: number;
+	response_time_ms: number;
+	is_healthy: boolean;
+	health_status: HealthStatus;
+	error_message?: string;
+	worker_datacenter: string;
+	worker_version: string;
 };
 
 export type RedisValueObject = {
-  destination: string;
-  user_id?: string | null;
-  analytics_owner_key?: string | null;
-  convex_user_id?: string | null;
-  tenant_id: string;
-  redirect_type: number;
-  created_at: number;
-  updated_at: number;
-  link_id: string;
-  is_active: boolean;
-  expires_at: number | null;
-  max_clicks: number | null;
-  tags: string[];
-  utm_params: Record<string, string>;
-  rules: {
-    geo?: Record<string, string>;
-    device?: Record<string, string>;
-    ab_test?: ABTestConfig;
-  };
-  features: {
-    track_clicks: boolean;
-    track_conversions: boolean;
-  };
-  custom_metadata: Record<string, unknown>;
-  version: number;
-  last_health_check?: number;
-  health_check_frequency_ms?: number;
+	destination: string;
+	user_id?: string | null;
+	analytics_owner_key?: string | null;
+	convex_user_id?: string | null;
+	tenant_id: string;
+	redirect_type: number;
+	created_at: number;
+	updated_at: number;
+	link_id: string;
+	is_active: boolean;
+	expires_at: number | null;
+	max_clicks: number | null;
+	tags: string[];
+	utm_params: Record<string, string>;
+	rules: {
+		geo?: Record<string, string>;
+		device?: Record<string, string>;
+		ab_test?: ABTestConfig;
+	};
+	features: {
+		track_clicks: boolean;
+		track_conversions: boolean;
+	};
+	custom_metadata: Record<string, unknown>;
+	version: number;
+	last_health_check?: number;
+	health_check_frequency_ms?: number;
 };

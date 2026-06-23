@@ -11,14 +11,14 @@
     "cf-typegen": "wrangler types --env-interface CloudflareBindings"
   },
   "dependencies": {
-    "@upstash/redis": "^1.35.3",
-    "convex": "^1.27.4",
-    "hono": "^4.12.26"
+    "@upstash/redis": "^1.38.0",
+    "convex": "^1.41.0",
+    "hono": "^4.12.27"
   },
   "devDependencies": {
-    "@biomejs/biome": "2.2.4",
-    "typescript": "^5.9.2",
-    "wrangler": "^4.103.0"
+    "@biomejs/biome": "2.5.0",
+    "typescript": "^6.0.3",
+    "wrangler": "^4.104.0"
   },
   "engines": {
     "node": ">=22.0.0"

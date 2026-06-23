@@ -1,9 +1,9 @@
-import type { Context } from "hono";
-import type { AnalyticsEventInput, RedisValueObject } from "./types";
 import { Redis } from "@upstash/redis/cloudflare";
-import { createRequestLogger } from "./log";
+import type { ConvexHttpClient } from "convex/browser";
+import type { Context } from "hono";
 import { api } from "./convex-api";
-import { ConvexHttpClient } from "convex/browser";
+import { createRequestLogger } from "./log";
+import type { AnalyticsEventInput, RedisValueObject } from "./types";
 
 /**
  * Build a redirect response
@@ -11,24 +11,29 @@ import { ConvexHttpClient } from "convex/browser";
  * @returns The redirect response
  */
 function buildClientRedirectResponse(location: URL): Response {
-    return new Response("", {
-        status: 302,
-        headers: new Headers({
-            Location: location.toString(),
-            "Cache-Control": "no-store, no-cache, max-age=0, must-revalidate",
-            Pragma: "no-cache",
-            Expires: "0",
-            "Content-Type": "text/plain; charset=utf-8",
-            // Encourage browsers to send UA-CH on subsequent requests
-            "Accept-CH": "Sec-CH-UA, Sec-CH-UA-Platform, Sec-CH-UA-Mobile, Sec-CH-UA-Full-Version-List",
-            "Critical-CH": "Sec-CH-UA, Sec-CH-UA-Platform, Sec-CH-UA-Mobile, Sec-CH-UA-Full-Version-List",
-        }),
-    });
+	return new Response("", {
+		status: 302,
+		headers: new Headers({
+			Location: location.toString(),
+			"Cache-Control": "no-store, no-cache, max-age=0, must-revalidate",
+			Pragma: "no-cache",
+			Expires: "0",
+			"Content-Type": "text/plain; charset=utf-8",
+			// Encourage browsers to send UA-CH on subsequent requests
+			"Accept-CH":
+				"Sec-CH-UA, Sec-CH-UA-Platform, Sec-CH-UA-Mobile, Sec-CH-UA-Full-Version-List",
+			"Critical-CH":
+				"Sec-CH-UA, Sec-CH-UA-Platform, Sec-CH-UA-Mobile, Sec-CH-UA-Full-Version-List",
+		}),
+	});
 }
 
 function isPrivateIpv4(hostname: string): boolean {
 	const parts = hostname.split(".").map((part) => Number(part));
-	if (parts.length !== 4 || parts.some((part) => !Number.isInteger(part) || part < 0 || part > 255)) {
+	if (
+		parts.length !== 4 ||
+		parts.some((part) => !Number.isInteger(part) || part < 0 || part > 255)
+	) {
 		return true;
 	}
 	const [a, b] = parts;
@@ -99,49 +104,63 @@ async function sha256Hex(value: string): Promise<string> {
 /**
  * Normalize common boolean env var strings to boolean with a default.
  */
-function getBooleanEnv(value: string | undefined, defaultValue: boolean): boolean {
+function getBooleanEnv(
+	value: string | undefined,
+	defaultValue: boolean,
+): boolean {
 	if (value === undefined) return defaultValue;
 	const normalized = value.trim().toLowerCase();
-	if (normalized === "false" || normalized === "0" || normalized === "no") return false;
+	if (normalized === "false" || normalized === "0" || normalized === "no")
+		return false;
 	return true;
 }
 
 /**
  * Coarse device type using UA-CH mobile hint first, else UA buckets.
  */
-function getDeviceType(userAgent: string, secChUaMobile?: string | null): string | null {
-    // Prefer UA-CH: Sec-CH-UA-Mobile: ?1 => mobile, ?0 => not mobile
-    const mobileHint = (secChUaMobile ?? "").trim();
-    if (mobileHint) {
-        const normalized = mobileHint.replace(/\"|\?/g, "").trim();
-        if (normalized === "1") return "mobile";
-    }
+function getDeviceType(
+	userAgent: string,
+	secChUaMobile?: string | null,
+): string | null {
+	// Prefer UA-CH: Sec-CH-UA-Mobile: ?1 => mobile, ?0 => not mobile
+	const mobileHint = (secChUaMobile ?? "").trim();
+	if (mobileHint) {
+		const normalized = mobileHint.replace(/"|\?/g, "").trim();
+		if (normalized === "1") return "mobile";
+	}
 
-    if (!userAgent) return "Unknown";
-    const ua = userAgent.toLowerCase();
+	if (!userAgent) return "Unknown";
+	const ua = userAgent.toLowerCase();
 
-    // Tablets
-    if (/(tablet|ipad|playbook|silk)|(android(?!.*mobi))/i.test(ua)) {
-        return "tablet";
-    }
+	// Tablets
+	if (/(tablet|ipad|playbook|silk)|(android(?!.*mobi))/i.test(ua)) {
+		return "tablet";
+	}
 
-    // Mobiles
-    if (/mobile|iphone|ipod|android|blackberry|opera mini|opera mobi|skyfire|maemo|windows phone|palm|iemobile|symbian|symbianos|fennec/i.test(ua)) {
-        return "mobile";
-    }
+	// Mobiles
+	if (
+		/mobile|iphone|ipod|android|blackberry|opera mini|opera mobi|skyfire|maemo|windows phone|palm|iemobile|symbian|symbianos|fennec/i.test(
+			ua,
+		)
+	) {
+		return "mobile";
+	}
 
-    // Desktops
-    if (/windows|macintosh|mac os x|linux|x11/i.test(ua)) {
-        return "desktop";
-    }
+	// Desktops
+	if (/windows|macintosh|mac os x|linux|x11/i.test(ua)) {
+		return "desktop";
+	}
 
-    return "desktop";
+	return "desktop";
 }
 
 /**
  * Determine operating system using Client Hints when available, else fallback to UA parsing.
  */
-function getOS(userAgent: string, secChUaPlatform?: string | null): string | null {
+function getOS(
+	userAgent: string,
+	secChUaPlatform?: string | null,
+): string | null {
 	// Prefer client hints if provided
 	const platform = (secChUaPlatform ?? "").replace(/"/g, "").trim();
 	if (platform && platform.toLowerCase() !== "unknown") {
@@ -215,7 +234,8 @@ function isBot(userAgent: string, cf?: any): boolean {
 	if (!userAgent) return false;
 	const ua = userAgent.toLowerCase();
 	// Broad but safe list of common bot indicators
-	const botRegex = /(bot|crawler|spider|crawling|curl|wget|httpclient|python-requests|libwww|bingpreview|facebookexternalhit|slurp|mediapartners-google|phantomjs|headless|puppeteer|lighthouse|semrush|ahrefs|yandex|googlebot|bingbot|duckduckbot)/i;
+	const botRegex =
+		/(bot|crawler|spider|crawling|curl|wget|httpclient|python-requests|libwww|bingpreview|facebookexternalhit|slurp|mediapartners-google|phantomjs|headless|puppeteer|lighthouse|semrush|ahrefs|yandex|googlebot|bingbot|duckduckbot)/i;
 	return botRegex.test(ua);
 }
 
@@ -226,11 +246,13 @@ function getBrowser(userAgent: string, secChUa?: string | null): string | null {
 	// 1) Try to parse from UA Client Hints (brand list). This may contain multiple brands.
 	const header = (secChUa ?? "").trim();
 	if (header) {
-		const brandRegex = /"([^\"]+)";v="[^"]+"/g;
+		const brandRegex = /"([^"]+)";v="[^"]+"/g;
 		const brands: string[] = [];
 		let match: RegExpExecArray | null;
-		while ((match = brandRegex.exec(header)) !== null) {
+		match = brandRegex.exec(header);
+		while (match !== null) {
 			brands.push(match[1]);
+			match = brandRegex.exec(header);
 		}
 		// Filter out the generic NotA_Brand marker
 		const filtered = brands.filter((b) => !/not\??a_brand/i.test(b));
@@ -289,8 +311,22 @@ function getBrowser(userAgent: string, secChUa?: string | null): string | null {
 	if (/duckduckgo/.test(ua)) return "DuckDuckGo";
 	if (/yabrowser/.test(ua)) return "Yandex";
 	if (/ucbrowser/.test(ua)) return "UC Browser";
-	if (/chrome\//.test(ua) && !/edg\//.test(ua) && !/opr\//.test(ua) && !/samsungbrowser\//.test(ua)) return "Chrome";
-	if (/safari\//.test(ua) && !/chrome\//.test(ua) && !/crios\//.test(ua) && !/fxios\//.test(ua) && !/edgios\//.test(ua) && !/opr\//.test(ua)) return "Safari";
+	if (
+		/chrome\//.test(ua) &&
+		!/edg\//.test(ua) &&
+		!/opr\//.test(ua) &&
+		!/samsungbrowser\//.test(ua)
+	)
+		return "Chrome";
+	if (
+		/safari\//.test(ua) &&
+		!/chrome\//.test(ua) &&
+		!/crios\//.test(ua) &&
+		!/fxios\//.test(ua) &&
+		!/edgios\//.test(ua) &&
+		!/opr\//.test(ua)
+	)
+		return "Safari";
 	if (/firefox\//.test(ua)) return "Firefox";
 	if (/msie/.test(ua) || /trident\//.test(ua)) return "Internet Explorer";
 
@@ -300,7 +336,10 @@ function getBrowser(userAgent: string, secChUa?: string | null): string | null {
 /**
  * Generate a session ID based on IP hash and user agent
  */
-async function generateSessionId(ipHash: string, userAgent: string): Promise<string> {
+async function generateSessionId(
+	ipHash: string,
+	userAgent: string,
+): Promise<string> {
 	const sessionKey = `${ipHash}-${userAgent}`;
 	if (crypto.subtle) {
 		// Use crypto.subtle if available (more secure)
@@ -333,17 +372,21 @@ async function buildAnalyticsInput(
 	const ref = req.header("referer") ?? req.header("referrer") ?? null;
 
 	// Prefer client hints when available for device, else UA parsing
-    const deviceType = getDeviceType(userAgent, req.header("sec-ch-ua-mobile"));
+	const deviceType = getDeviceType(userAgent, req.header("sec-ch-ua-mobile"));
 	const browser = getBrowser(
 		userAgent,
-		req.header("sec-ch-ua-full-version-list") ?? req.header("sec-ch-ua")
+		req.header("sec-ch-ua-full-version-list") ?? req.header("sec-ch-ua"),
 	);
 	const os = getOS(userAgent, req.header("sec-ch-ua-platform"));
-	const requestId = req.header("cf-ray") ?? req.header("x-request-id") ?? crypto.randomUUID();
-	const ip = req.header("cf-connecting-ip") ?? req.header("x-forwarded-for") ?? "";
+	const requestId =
+		req.header("cf-ray") ?? req.header("x-request-id") ?? crypto.randomUUID();
+	const ip =
+		req.header("cf-connecting-ip") ?? req.header("x-forwarded-for") ?? "";
 	const ipHash = await sha256Hex(ip);
 	const languageHeader = req.header("accept-language") ?? null;
-	const language = languageHeader ? languageHeader.split(",")[0]?.trim() || null : null;
+	const language = languageHeader
+		? languageHeader.split(",")[0]?.trim() || null
+		: null;
 	const trackingEnabled = getBooleanEnv(c.env.TRACKING_ENABLED, true);
 
 	// Generate session ID based on IP hash and user agent
@@ -364,11 +407,26 @@ async function buildAnalyticsInput(
 		log.warn("Failed to evaluate first-click flag", { error: String(err) });
 	}
 
-	const utm_source = url.searchParams.get("utm_source") || redisValue?.utm_params?.utm_source || null;
-	const utm_medium = url.searchParams.get("utm_medium") || redisValue?.utm_params?.utm_medium || null;
-	const utm_campaign = url.searchParams.get("utm_campaign") || redisValue?.utm_params?.utm_campaign || null;
-	const utm_term = url.searchParams.get("utm_term") || redisValue?.utm_params?.utm_term || null;
-	const utm_content = url.searchParams.get("utm_content") || redisValue?.utm_params?.utm_content || null;
+	const utm_source =
+		url.searchParams.get("utm_source") ||
+		redisValue?.utm_params?.utm_source ||
+		null;
+	const utm_medium =
+		url.searchParams.get("utm_medium") ||
+		redisValue?.utm_params?.utm_medium ||
+		null;
+	const utm_campaign =
+		url.searchParams.get("utm_campaign") ||
+		redisValue?.utm_params?.utm_campaign ||
+		null;
+	const utm_term =
+		url.searchParams.get("utm_term") ||
+		redisValue?.utm_params?.utm_term ||
+		null;
+	const utm_content =
+		url.searchParams.get("utm_content") ||
+		redisValue?.utm_params?.utm_content ||
+		null;
 
 	return {
 		idempotency_key: requestId,
@@ -419,10 +477,11 @@ async function drainOrCancel(res: Response) {
 			res.body?.cancel();
 		}
 	} catch {
-		try { res.body?.cancel(); } catch {}
+		try {
+			res.body?.cancel();
+		} catch {}
 	}
 }
-
 
 async function recordClickInConvex(
 	c: Context,
@@ -440,7 +499,10 @@ async function recordClickInConvex(
 	},
 ) {
 	const log = createRequestLogger(c, { component: "convex" });
-	const requestId = c.req.header("cf-ray") ?? c.req.header("x-request-id") ?? crypto.randomUUID();
+	const requestId =
+		c.req.header("cf-ray") ??
+		c.req.header("x-request-id") ??
+		crypto.randomUUID();
 
 	try {
 		await convex.mutation(api.urlAnalytics.mutateUrlAnalytics, {
@@ -468,7 +530,10 @@ async function recordClickInConvex(
  * @param cacheSeconds - The cache seconds
  * @returns The no content response
  */
-function buildNoContentResponse(status = 204, cacheSeconds = 31536000): Response {
+function buildNoContentResponse(
+	status = 204,
+	cacheSeconds = 31536000,
+): Response {
 	return new Response(null, {
 		status,
 		headers: { "Cache-Control": `public, max-age=${cacheSeconds}, immutable` },
@@ -482,7 +547,10 @@ function buildNoContentResponse(status = 204, cacheSeconds = 31536000): Response
  * @param utmParams - Record of UTM params from Redis
  * @returns New URL with UTM params appended
  */
-function appendUtmParamsToUrl(destinationUrl: URL, utmParams: Record<string, string>): URL {
+function appendUtmParamsToUrl(
+	destinationUrl: URL,
+	utmParams: Record<string, string>,
+): URL {
 	const url = new URL(destinationUrl.toString());
 	for (const [key, value] of Object.entries(utmParams)) {
 		// Only add if the param doesn't already exist in the destination URL
@@ -493,20 +561,18 @@ function appendUtmParamsToUrl(destinationUrl: URL, utmParams: Record<string, str
 	return url;
 }
 
-
-
 export {
-	buildClientRedirectResponse,
-	sha256Hex,
-	getBooleanEnv,
-	getDeviceType,
-	getBrowser,
-	getOS,
-	isBot,
-	buildAnalyticsInput,
-	drainOrCancel,
-	recordClickInConvex,
-	buildNoContentResponse,
 	appendUtmParamsToUrl,
 	assertSafeDestinationUrl,
+	buildAnalyticsInput,
+	buildClientRedirectResponse,
+	buildNoContentResponse,
+	drainOrCancel,
+	getBooleanEnv,
+	getBrowser,
+	getDeviceType,
+	getOS,
+	isBot,
+	recordClickInConvex,
+	sha256Hex,
 };

@@ -12,6 +12,7 @@
     "types": [
       "./worker-configuration.d.ts"
     ],
+    "ignoreDeprecations": "6.0",
     "jsx": "react-jsx",
     "jsxImportSource": "hono/jsx",
     "baseUrl": ".",
