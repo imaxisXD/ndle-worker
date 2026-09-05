@@ -1,6 +1,6 @@
 import { expect, spyOn, test } from "bun:test";
 import { Redis } from "@upstash/redis/cloudflare";
-import app from "./index";
+import { app } from "./index";
 
 for (const destination of [
 	"not a URL",

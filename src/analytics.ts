@@ -50,25 +50,44 @@ export function normalizeAnalyticsEvent(
 
 /**
  * Send an analytics event to the ingestion API.
- * - endpoint example: "https://api.tinybird.co/v0/events?name=your_datasource_name"
- * - token should be a Tinybird token with EVENTS_WRITE scope
+ * A successful response means the ingestion service accepted the event durably.
  */
 export async function sendAnalyticsEvent(params: {
 	endpoint: string;
 	token: string;
 	event: AnalyticsEventInput;
 	fetchImpl?: typeof fetch;
-}): Promise<Response> {
+}): Promise<"queued" | "ignored"> {
 	const { endpoint, token, event, fetchImpl } = params;
 	const payload = normalizeAnalyticsEvent(event);
 	const doFetch = fetchImpl ?? fetch;
 
-	return doFetch(endpoint, {
+	const response = await doFetch(endpoint, {
 		method: "POST",
 		headers: {
 			Authorization: `Bearer ${token}`,
 			"Content-Type": "application/json",
 		},
 		body: JSON.stringify(payload),
+		signal: AbortSignal.timeout(10_000),
 	});
+	if (response.status !== 202) {
+		await response.body?.cancel();
+		throw new Error(`Analytics delivery failed with status ${response.status}`);
+	}
+	const result: unknown = await response.json();
+	if (
+		typeof result !== "object" ||
+		result === null ||
+		!("success" in result) ||
+		result.success !== true ||
+		!("idempotency_key" in result) ||
+		result.idempotency_key !== payload.idempotency_key ||
+		!("status" in result) ||
+		(result.status !== "queued" && result.status !== "ignored")
+	)
+		throw new Error(
+			"Analytics delivery did not confirm this event was accepted",
+		);
+	return result.status;
 }

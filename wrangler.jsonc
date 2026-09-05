@@ -4,6 +4,16 @@
   "main": "src/index.ts",
   "compatibility_date": "2025-09-15",
   "workers_dev": false,
+  "queues": {
+    "producers": [{ "binding": "CLICK_EVENTS", "queue": "ndle-click-events" }],
+    "consumers": [{
+      "queue": "ndle-click-events",
+      "max_batch_size": 10,
+      "max_batch_timeout": 1,
+      "max_retries": 12,
+      "dead_letter_queue": "ndle-click-events-failed"
+    }]
+  },
   
   // Production environment (default)
   "routes": [
@@ -26,6 +36,16 @@
   "env": {
     "dev": {
       "name": "ndleworker-dev",
+      "queues": {
+        "producers": [{ "binding": "CLICK_EVENTS", "queue": "ndle-click-events-dev" }],
+        "consumers": [{
+          "queue": "ndle-click-events-dev",
+          "max_batch_size": 10,
+          "max_batch_timeout": 1,
+          "max_retries": 12,
+          "dead_letter_queue": "ndle-click-events-failed-dev"
+        }]
+      },
       "routes": [
         {
           "pattern": "dev.ndle.im/*",
@@ -38,7 +58,7 @@
       ],
       "vars": {
         "CONVEX_URL": "https://tame-sparrow-238.convex.cloud",
-        "INGEST_ENDPOINT": "https://api.ndle.app/ingest",
+        "INGEST_ENDPOINT": "",
         "WORKER_VERSION": "dev"
       }
     }

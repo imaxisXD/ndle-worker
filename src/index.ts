@@ -1,25 +1,22 @@
+import { Redis } from "@upstash/redis/cloudflare";
+import { Hono } from "hono";
+import { normalizeAnalyticsEvent } from "./analytics";
+import { consumeClicks, parseQueuedClick } from "./click-delivery";
 import {
 	buildAnalyticsInput,
 	buildClientRedirectResponse,
 	buildNoContentResponse,
-	drainOrCancel,
-	recordClickInConvex,
-} from "@helper";
-import { Redis } from "@upstash/redis/cloudflare";
-import { ConvexHttpClient } from "convex/browser";
-import { Hono } from "hono";
-import { sendAnalyticsEvent } from "./analytics";
+	getBooleanEnv,
+} from "./helper";
 import { createRequestLogger } from "./log";
 import { decideRedirect } from "./redirect-decision";
 import type { Bindings, RedisValueObject } from "./types";
 
-const app = new Hono<{ Bindings: Bindings }>();
-
+export const app = new Hono<{ Bindings: Bindings }>();
 app.get("/favicon.ico", () => buildNoContentResponse());
 app.get("/apple-touch-icon.png", () => buildNoContentResponse());
 app.get("/apple-touch-icon-precomposed.png", () => buildNoContentResponse());
 app.get("/apple-touch-icon-:variant.png", () => buildNoContentResponse());
-
 app.get(
 	"/:filename{[^/]+\\.[a-zA-Z0-9]+}",
 	() =>
@@ -32,132 +29,69 @@ app.get(
 app.get("/:websiteSlug{[A-Za-z0-9_-]+}", async (c) => {
 	const start = Date.now();
 	const slug = c.req.param("websiteSlug");
-	const log = createRequestLogger(c, { slug });
-	const requestId =
-		c.req.header("cf-ray") ??
-		c.req.header("x-request-id") ??
-		crypto.randomUUID();
-	log.info("Incoming request", { request_id: requestId });
-	if (!slug) {
-		log.warn("Missing slug in path", { request_id: requestId });
-		return c.text("Not found", 404);
-	}
-	if (c.req.method !== "GET") {
-		log.warn("Blocked non-GET request", {
-			method: c.req.method,
-			request_id: requestId,
+	const requestId = crypto.randomUUID();
+	const log = createRequestLogger(c, { slug, request_id: requestId });
+	if (c.req.method !== "GET") return c.text("Method not allowed", 405);
+	try {
+		const redisValue = await Redis.fromEnv(c.env).json.get<RedisValueObject>(
+			slug,
+		);
+		if (!redisValue) return c.notFound();
+		const decision = await decideRedirect({
+			redisValue,
+			readHeader: (name) => c.req.header(name),
 		});
-		return c.text("Method not allowed", 405);
-	}
-
-	// Create Convex client using environment variable
-	const convex = new ConvexHttpClient(c.env.CONVEX_URL);
-
-	log.info("Looking up redirect in Redis", { request_id: requestId });
-	const redisValue = await Redis.fromEnv(c.env).json.get<RedisValueObject>(
-		slug,
-	);
-
-	if (!redisValue) {
-		log.warn("Slug not found", { request_id: requestId });
-		return c.notFound();
-	}
-
-	const decision = await decideRedirect({
-		redisValue,
-		readHeader: (name) => c.req.header(name) ?? undefined,
-	});
-
-	if (decision.kind === "blocked") {
-		log.warn("Cannot redirect slug", {
-			reason: decision.reason,
-			expires_at: redisValue.expires_at ?? null,
-			is_active: redisValue.is_active ?? null,
-			request_id: requestId,
-		});
-		return c.notFound();
-	}
-
-	const finalUrl = decision.destination;
-	const variantId = decision.variantId;
-	const response = buildClientRedirectResponse(finalUrl);
-	const redirectLatency = Date.now() - start;
-
-	log.info("Redirecting to destination", {
-		source: "redis",
-		destination: finalUrl.toString(),
-		variantId,
-		latency_ms: redirectLatency,
-		status: 302,
-		request_id: requestId,
-	});
-
-	c.executionCtx.waitUntil(
-		(async () => {
-			try {
-				const event = await buildAnalyticsInput(
+		if (decision.kind === "blocked") {
+			log.info("Link cannot be opened", { reason: decision.reason });
+			return c.notFound();
+		}
+		const trackingEnabled =
+			getBooleanEnv(c.env.TRACKING_ENABLED, true) &&
+			redisValue.features?.track_clicks !== false;
+		if (trackingEnabled) {
+			const event = normalizeAnalyticsEvent(
+				await buildAnalyticsInput(
 					c,
-					finalUrl.toString(),
+					decision.destination.toString(),
 					slug,
-					redirectLatency,
+					Date.now() - start,
 					redisValue,
-					variantId,
-				);
-				const tasks: Promise<unknown>[] = [];
-				if (c.env.ANALYTICS_ENDPOINT && c.env.ANALYTICS_TOKEN) {
-					log.info("Sending analytics (cache miss)", {
-						source: "redis",
-						request_id: event.request_id,
-					});
-					tasks.push(
-						sendAnalyticsEvent({
-							endpoint: c.env.ANALYTICS_ENDPOINT,
-							token: c.env.ANALYTICS_TOKEN,
-							event,
-						}).then(drainOrCancel),
-					);
-				}
-				if (c.env.API_SECRET && c.env.INGEST_ENDPOINT) {
-					log.info("Sending analytics to new endpoint (cache miss)", {
-						source: "redis",
-						request_id: event.request_id,
-					});
-					tasks.push(
-						sendAnalyticsEvent({
-							endpoint: c.env.INGEST_ENDPOINT,
-							token: c.env.API_SECRET,
-							event,
-						}).then(drainOrCancel),
-					);
-				}
-
-				const { link_id: linkId } = redisValue;
-
-				if (linkId && redisValue.is_active && !event.is_bot) {
-					const clickEvent = {
-						linkSlug: slug,
-						occurredAt: Date.now(),
-						country: event.country || "Unknown",
-						city: event.city ?? undefined,
-						deviceType: event.device_type || "desktop",
-						browser: event.browser || "Unknown",
-						os: event.os || "Unknown",
-						referer: event.referer ?? undefined,
-					};
-					tasks.push(recordClickInConvex(c, linkId, convex, clickEvent));
-				}
-
-				if (tasks.length) await Promise.allSettled(tasks);
-			} catch (error) {
-				log.error("Failed to send analytics (cache miss)", {
-					source: "redis",
-					error: String(error),
-				});
-			}
-		})(),
-	);
-
-	return response;
+					decision.variantId,
+					requestId,
+				),
+			);
+			// A tracked redirect means the event has been accepted durably.
+			// Do not replace this await with waitUntil or direct HTTP fanout.
+			await c.env.CLICK_EVENTS.send(parseQueuedClick({ version: 1, event }), {
+				contentType: "json",
+			});
+		}
+		log.info("Redirect ready", {
+			status: 302,
+			latency_ms: Date.now() - start,
+			tracking_enabled: trackingEnabled,
+		});
+		return buildClientRedirectResponse(decision.destination);
+	} catch (error) {
+		log.error("Link could not be opened right now", {
+			error,
+			latency_ms: Date.now() - start,
+		});
+		return new Response(
+			"This link is temporarily unavailable. Please try again.",
+			{
+				status: 503,
+				headers: {
+					"Cache-Control": "no-store",
+					"Retry-After": "5",
+					"Content-Type": "text/plain; charset=utf-8",
+				},
+			},
+		);
+	}
 });
 
-export default app;
+export default {
+	fetch: app.fetch,
+	queue: consumeClicks,
+} satisfies ExportedHandler<Bindings>;

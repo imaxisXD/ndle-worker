@@ -78,15 +78,16 @@ export type AnalyticsEventInput = Omit<
 type AppRuntimeBindings = {
 	UPSTASH_REDIS_REST_TOKEN: string;
 	UPSTASH_REDIS_REST_URL: string;
-	ANALYTICS_ENDPOINT?: string;
-	ANALYTICS_TOKEN?: string;
-	API_SECRET?: string;
+	API_SECRET: string;
 	TRACKING_ENABLED?: string;
 	LOG_LEVEL?: string;
-	SHARED_SECRET?: string;
+	SHARED_SECRET: string;
 };
 
-export type Bindings = CloudflareBindings & AppRuntimeBindings;
+export type QueuedClick = { version: 1; event: AnalyticsEvent };
+
+export type Bindings = Omit<CloudflareBindings, "CLICK_EVENTS"> &
+	AppRuntimeBindings & { CLICK_EVENTS: Queue<QueuedClick> };
 
 // A/B Testing types
 export type ABVariant = {

@@ -1,8 +1,5 @@
 import { Redis } from "@upstash/redis/cloudflare";
-import type { ConvexHttpClient } from "convex/browser";
 import type { Context } from "hono";
-import { recordClick } from "./convex-api";
-import { createRequestLogger } from "./log";
 import type { AnalyticsEventInput, RedisValueObject } from "./types";
 
 /**
@@ -198,8 +195,8 @@ function getOS(
 		// Extract version for more specific macOS detection
 		const match = ua.match(/mac os x (\d+)_(\d+)/);
 		if (match) {
-			const major = parseInt(match[1]);
-			const minor = parseInt(match[2]);
+			const major = parseInt(match[1], 10);
+			const minor = parseInt(match[2], 10);
 			if (major >= 12) return "macOS Monterey+";
 			if (major >= 11) return "macOS Big Sur+";
 			if (major >= 10 && minor >= 15) return "macOS Catalina+";
@@ -217,7 +214,10 @@ function getOS(
 /**
  * Bot detection using Cloudflare Bot Management when available, else UA regex fallback.
  */
-function isBot(userAgent: string, cf?: any): boolean {
+function isBot(
+	userAgent: string,
+	cf?: { botManagement?: { verifiedBot?: boolean; score?: number } },
+): boolean {
 	try {
 		const bm = cf?.botManagement;
 		if (bm) {
@@ -361,10 +361,11 @@ async function buildAnalyticsInput(
 	latencyMs: number,
 	redisValue?: RedisValueObject | null,
 	variantId?: string | null,
+	requestId = crypto.randomUUID(),
 ): Promise<AnalyticsEventInput> {
 	const req = c.req;
-	const raw = req.raw as Request & { cf?: any };
-	const cf = raw.cf ?? {};
+	const raw = req.raw as Request & { cf?: IncomingRequestCfProperties };
+	const cf: Partial<IncomingRequestCfProperties> = raw.cf ?? {};
 	const now = new Date();
 	const url = new URL(req.url);
 	const shortUrl = `${url.origin}/${slug}`;
@@ -378,8 +379,6 @@ async function buildAnalyticsInput(
 		req.header("sec-ch-ua-full-version-list") ?? req.header("sec-ch-ua"),
 	);
 	const os = getOS(userAgent, req.header("sec-ch-ua-platform"));
-	const requestId =
-		req.header("cf-ray") ?? req.header("x-request-id") ?? crypto.randomUUID();
 	const ip =
 		req.header("cf-connecting-ip") ?? req.header("x-forwarded-for") ?? "";
 	const ipHash = await sha256Hex(ip);
@@ -387,25 +386,18 @@ async function buildAnalyticsInput(
 	const language = languageHeader
 		? languageHeader.split(",")[0]?.trim() || null
 		: null;
-	const trackingEnabled = getBooleanEnv(c.env.TRACKING_ENABLED, true);
+	const trackingEnabled =
+		getBooleanEnv(c.env.TRACKING_ENABLED, true) &&
+		redisValue?.features?.track_clicks !== false;
 
 	// Generate session ID based on IP hash and user agent
 	const sessionId = await generateSessionId(ipHash, userAgent);
 
 	// Track first-click-of-session using Redis short-lived key
-	let firstClickOfSession = true;
-	try {
-		const redis = Redis.fromEnv(c.env);
-		const sessionKey = `session:${sessionId}:${slug}`;
-		const exists = await redis.exists(sessionKey);
-		firstClickOfSession = exists === 0;
-		if (firstClickOfSession) {
-			await redis.set(sessionKey, "1", { ex: 1800 });
-		}
-	} catch (err) {
-		const log = createRequestLogger(c, { component: "analytics" });
-		log.warn("Failed to evaluate first-click flag", { error: String(err) });
-	}
+	const redis = Redis.fromEnv(c.env);
+	const sessionKey = `session:${sessionId}:${slug}`;
+	const firstClickOfSession =
+		(await redis.set(sessionKey, requestId, { nx: true, ex: 1800 })) === "OK";
 
 	const utm_source =
 		url.searchParams.get("utm_source") ||
@@ -466,65 +458,6 @@ async function buildAnalyticsInput(
 }
 
 /**
- * Drain or cancel a response
- * @param res - The response
- */
-async function drainOrCancel(res: Response) {
-	try {
-		if (res.ok) {
-			await res.arrayBuffer();
-		} else {
-			res.body?.cancel();
-		}
-	} catch {
-		try {
-			res.body?.cancel();
-		} catch {}
-	}
-}
-
-async function recordClickInConvex(
-	c: Context,
-	urlId: string,
-	convex: ConvexHttpClient,
-	clickEvent: {
-		linkSlug: string;
-		occurredAt: number;
-		country: string;
-		city?: string;
-		deviceType: string;
-		browser: string;
-		os: string;
-		referer?: string;
-	},
-) {
-	const log = createRequestLogger(c, { component: "convex" });
-	const requestId =
-		c.req.header("cf-ray") ??
-		c.req.header("x-request-id") ??
-		crypto.randomUUID();
-
-	try {
-		await convex.mutation(recordClick, {
-			sharedSecret: c.env.SHARED_SECRET,
-			urlId,
-			urlStatusCode: 0,
-			urlStatusMessage: "",
-			requestId,
-			clickEvent,
-		});
-
-		log.debug("Click recorded in Convex", { urlId, request_id: requestId });
-	} catch (err) {
-		log.warn("Click write failed", {
-			urlId,
-			error: String(err),
-			request_id: requestId,
-		});
-	}
-}
-
-/**
  * Build a no content response
  * @param status - The status code
  * @param cacheSeconds - The cache seconds
@@ -567,12 +500,10 @@ export {
 	buildAnalyticsInput,
 	buildClientRedirectResponse,
 	buildNoContentResponse,
-	drainOrCancel,
 	getBooleanEnv,
 	getBrowser,
 	getDeviceType,
 	getOS,
 	isBot,
-	recordClickInConvex,
 	sha256Hex,
 };
