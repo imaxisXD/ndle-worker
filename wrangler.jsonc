@@ -4,8 +4,13 @@
   "main": "src/index.ts",
   "compatibility_date": "2025-09-15",
   "workers_dev": false,
+  "triggers": { "crons": ["*/5 * * * *"] },
+  "r2_buckets": [{ "binding": "ANALYTICS_BACKUPS", "bucket_name": "ndle-analytics" }],
   "queues": {
-    "producers": [{ "binding": "CLICK_EVENTS", "queue": "ndle-click-events" }],
+    "producers": [
+      { "binding": "CLICK_EVENTS", "queue": "ndle-click-events" },
+      { "binding": "CLICK_EVENTS_FAILED", "queue": "ndle-click-events-failed" }
+    ],
     "consumers": [{
       "queue": "ndle-click-events",
       "max_batch_size": 10,
@@ -29,6 +34,8 @@
   "vars": {
     "CONVEX_URL": "https://cheery-starling-175.convex.cloud",
     "INGEST_ENDPOINT": "https://api.ndle.app/ingest",
+    "MONITOR_READY_ENDPOINT": "https://monitor.ndle.app/ready",
+    "OPS_ALERTS_ENABLED": "true",
     "WORKER_VERSION": "prod"
   },
   
@@ -36,8 +43,13 @@
   "env": {
     "dev": {
       "name": "ndleworker-dev",
+      "triggers": { "crons": [] },
+      "r2_buckets": [{ "binding": "ANALYTICS_BACKUPS", "bucket_name": "ndle-analytics-dev" }],
       "queues": {
-        "producers": [{ "binding": "CLICK_EVENTS", "queue": "ndle-click-events-dev" }],
+        "producers": [
+          { "binding": "CLICK_EVENTS", "queue": "ndle-click-events-dev" },
+          { "binding": "CLICK_EVENTS_FAILED", "queue": "ndle-click-events-failed-dev" }
+        ],
         "consumers": [{
           "queue": "ndle-click-events-dev",
           "max_batch_size": 10,
@@ -59,6 +71,8 @@
       "vars": {
         "CONVEX_URL": "https://tame-sparrow-238.convex.cloud",
         "INGEST_ENDPOINT": "",
+        "MONITOR_READY_ENDPOINT": "",
+        "OPS_ALERTS_ENABLED": "false",
         "WORKER_VERSION": "dev"
       }
     }

@@ -82,6 +82,9 @@ type AppRuntimeBindings = {
 	TRACKING_ENABLED?: string;
 	LOG_LEVEL?: string;
 	SHARED_SECRET: string;
+	RESEND_API_KEY?: string;
+	OPS_ALERT_FROM?: string;
+	OPS_ALERT_TO?: string;
 };
 
 export type QueuedClick = { version: 1; event: AnalyticsEvent };

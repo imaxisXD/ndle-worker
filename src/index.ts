@@ -9,6 +9,7 @@ import {
 	getBooleanEnv,
 } from "./helper";
 import { createRequestLogger } from "./log";
+import { checkOperations } from "./operations";
 import { decideRedirect } from "./redirect-decision";
 import type { Bindings, RedisValueObject } from "./types";
 
@@ -94,4 +95,7 @@ app.get("/:websiteSlug{[A-Za-z0-9_-]+}", async (c) => {
 export default {
 	fetch: app.fetch,
 	queue: consumeClicks,
+	async scheduled(_controller, env) {
+		await checkOperations(env);
+	},
 } satisfies ExportedHandler<Bindings>;

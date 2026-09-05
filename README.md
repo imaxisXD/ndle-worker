@@ -61,6 +61,43 @@ forgotten. Changing a payload requires a deliberate repair that keeps the
 original event ID; do not silently discard it or rewrite its ownership in this
 Worker. Owner changes are resolved by each downstream authority.
 
+## Operational email alerts
+
+The production scheduled handler checks NDLE every five minutes, separately
+from redirects and click delivery. Development has no schedule and alerts are
+disabled. Set `RESEND_API_KEY`, `OPS_ALERT_FROM` and `OPS_ALERT_TO` with Wrangler
+secrets; use a sending-only key restricted to the verified NDLE sender domain.
+`OPS_ALERTS_ENABLED=false` disables checks without changing redirects.
+
+Email is sent when the main queue's oldest reported event is over five minutes
+old, its backlog exceeds 10,000 messages or 100 MB, or the failed-click queue
+contains any message. Checks also cover ingest readiness and detailed component
+health, any failed ingest job, more than 1,000 waiting ingest jobs, monitoring
+readiness, and a missing/invalid backup or a latest backup older than 26 hours.
+The backup check reads only the latest manifest and the referenced object's
+metadata; checksum verification remains the database owner's backup duty.
+
+Each source has its own 12-second deadline. A source failure or timeout becomes
+an unavailable alert while the other checks finish. HTTP requests have their
+own ten-second timeout and cannot follow redirects. No event bodies, owner data
+or credentials are included in email or alert logs.
+
+Healthy checks send no email. A stable issue set, recipient and sender use the
+same provider idempotency key within a UTC hour, avoiding duplicate mail on
+retries and overlapping runs. Persistent problems remind at most once per hour;
+a changed set can send another alert. Resend retains these keys for
+[24 hours](https://resend.com/docs/dashboard/emails/idempotency-keys). Provider
+rejection fails the scheduled run and is logged; acceptance is not proof that
+the recipient read the message. Observe Cron executions and provider delivery
+status after deployment. A failure of the alert provider or Cloudflare itself
+still requires an independent external check.
+
+Queue age is based on Cloudflare's reported oldest timestamp. A small backlog
+without that timestamp cannot establish its age. Ingest's detailed endpoint
+does not expose the oldest internal job's age, and monitoring readiness does
+not establish per-link delivery freshness; those thresholds are not claimed by
+these checks. Existing failed monitoring jobs are retained for separate review.
+
 ## Local work and checks
 
 Use Node.js 22 or newer, pnpm, and Bun. Local secrets go in `.dev.vars`, with only
