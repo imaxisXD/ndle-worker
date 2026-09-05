@@ -1,8 +1,11 @@
 // Actual workerd + local R2 verification. Every outbound HTTP request is
 // intercepted. This does not load .dev.vars or create a persistent dev server.
 import assert from "node:assert/strict";
+import { spawnSync } from "node:child_process";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { createRequire } from "node:module";
-import { dirname, resolve } from "node:path";
+import { tmpdir } from "node:os";
+import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const project = resolve(dirname(fileURLToPath(import.meta.url)), "..");
@@ -533,6 +536,88 @@ try {
 			);
 		},
 	);
+	// Run the real CLI entry point in Node. Intercept its HTTP transport, not
+	// Queue.send(), so a second JSON encoding at the API boundary is detectable.
+	const transportDirectory = await mkdtemp(join(tmpdir(), "ndle-replay-http-"));
+	try {
+		const fixturePath = join(transportDirectory, "fixture.json");
+		const callsPath = join(transportDirectory, "calls.json");
+		await writeFile(
+			fixturePath,
+			JSON.stringify({
+				archive: await (await bucket.get(archiveKey("original"))).json(),
+				archiveKey: archiveKey("original"),
+				mainQueue,
+			}),
+			{ mode: 0o600 },
+		);
+		const intercept = `
+			import { readFileSync, writeFileSync } from "node:fs";
+			const fixture = JSON.parse(readFileSync(process.env.NDLE_REPLAY_FIXTURE, "utf8"));
+			const calls = [];
+			globalThis.fetch = async (input, options = {}) => {
+				const url = new URL(String(input));
+				calls.push({ url: url.href, method: options.method || "GET", redirect: options.redirect, headers: options.headers, body: options.body ? JSON.parse(options.body) : null });
+				writeFileSync(process.env.NDLE_REPLAY_CALLS, JSON.stringify(calls), { mode: 0o600 });
+				if (url.origin !== "https://api.cloudflare.com") throw new Error("Unexpected outbound request blocked");
+				if (url.pathname === "/client/v4/accounts/fixture-account/queues/fixture-queue-id") return Response.json({ success: true, result: { queue_name: fixture.mainQueue } });
+				if (url.pathname === "/client/v4/accounts/fixture-account/r2/buckets/fixture-bucket/objects/" + fixture.archiveKey) return Response.json(fixture.archive);
+				if (url.pathname === "/client/v4/accounts/fixture-account/queues/fixture-queue-id/messages" && options.method === "POST") return Response.json({ success: true });
+				throw new Error("Unexpected outbound request blocked");
+			};
+		`;
+		const child = spawnSync(
+			process.execPath,
+			[
+				"--import",
+				`data:text/javascript,${encodeURIComponent(intercept)}`,
+				join(project, "scripts/failed-clicks.mjs"),
+				"replay",
+				failedQueue,
+				"original",
+			],
+			{
+				cwd: project,
+				encoding: "utf8",
+				timeout: 15_000,
+				env: {
+					PATH: process.env.PATH,
+					CLOUDFLARE_ACCOUNT_ID: "fixture-account",
+					CLOUDFLARE_API_TOKEN: "FAKE-cloudflare-key",
+					FAILED_CLICK_BUCKET: "fixture-bucket",
+					CLICK_EVENTS_QUEUE_NAME: mainQueue,
+					CLICK_EVENTS_FAILED_QUEUE_NAME: failedQueue,
+					CLICK_EVENTS_QUEUE_ID: "fixture-queue-id",
+					NDLE_REPLAY_FIXTURE: fixturePath,
+					NDLE_REPLAY_CALLS: callsPath,
+				},
+			},
+		);
+		assert.equal(child.status, 0, child.stderr);
+		assert.deepEqual(JSON.parse(child.stdout), {
+			eventId: event.idempotency_key,
+			status: "requeued",
+			unresolved: true,
+		});
+		const calls = JSON.parse(await readFile(callsPath, "utf8"));
+		assert.equal(calls.length, 3);
+		const push = calls.find((call) => call.method === "POST");
+		assert.deepEqual(push.body, { body: original, content_type: "json" });
+		assert.equal(typeof push.body.body, "object");
+		assert.equal(calls.filter((call) => call.method !== "GET").length, 1);
+		for (const call of calls) {
+			assert.equal(call.redirect, "manual");
+			assert.equal(call.headers.Authorization, "Bearer FAKE-cloudflare-key");
+		}
+		assert.ok(await bucket.get(markerKey("original")));
+		assert.ok(await bucket.get(archiveKey("original")));
+		passed++;
+		console.log(
+			"PASS real replay CLI sends the original object in the Cloudflare HTTP request",
+		);
+	} finally {
+		await rm(transportDirectory, { recursive: true, force: true });
+	}
 	console.log(
 		JSON.stringify({
 			passed,
