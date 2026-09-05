@@ -202,12 +202,12 @@ export async function checkOperations(
 				const [ready, response] = await Promise.all([
 					sendRequest(new URL("/health/ready", env.INGEST_ENDPOINT), {
 						signal: AbortSignal.timeout(10_000),
-						redirect: "error",
+						redirect: "manual",
 					}),
 					sendRequest(new URL("/health/detailed", env.INGEST_ENDPOINT), {
 						headers: { Authorization: `Bearer ${env.API_SECRET}` },
 						signal: AbortSignal.timeout(10_000),
-						redirect: "error",
+						redirect: "manual",
 					}),
 				]);
 				if (response.status !== 200 && response.status !== 503)
@@ -223,7 +223,7 @@ export async function checkOperations(
 			run: async () => {
 				const response = await sendRequest(env.MONITOR_READY_ENDPOINT, {
 					signal: AbortSignal.timeout(10_000),
-					redirect: "error",
+					redirect: "manual",
 				});
 				const status = record(await readJson(response)).status;
 				return response.ok && status === "ready" ? [] : ["monitor_unavailable"];
@@ -260,7 +260,7 @@ export async function checkOperations(
 	const response = await sendRequest("https://api.resend.com/emails", {
 		method: "POST",
 		signal: AbortSignal.timeout(10_000),
-		redirect: "error",
+		redirect: "manual",
 		headers: {
 			Authorization: `Bearer ${env.RESEND_API_KEY}`,
 			"Content-Type": "application/json",

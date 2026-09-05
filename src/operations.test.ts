@@ -241,3 +241,31 @@ test("stalled native bindings cannot suppress a known failed-event alert", async
 	expect(text).toContain("failed-click queue contains events");
 	expect(text).toContain("backup or its manifest is missing or invalid");
 });
+
+test("redirected health checks alert and redirected email delivery fails without following", async () => {
+	const calls: string[] = [];
+	let message = "";
+	spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
+		calls.push(String(input));
+		// Cloudflare only supports follow and manual. Manual also keeps service
+		// credentials from being forwarded to an unexpected redirect destination.
+		expect(init?.redirect).toBe("manual");
+		if (String(input).includes("resend.com"))
+			message = JSON.parse(String(init?.body)).text;
+		return Response.json(
+			{ status: "ready", id: "not-an-email-receipt" },
+			{ status: 302, headers: { Location: "https://unexpected.example.test" } },
+		);
+	});
+	await expect(checkOperations(environment(), now)).rejects.toThrow(
+		"email was not accepted (HTTP 302)",
+	);
+	expect(message).toContain("analytics service is unavailable");
+	expect(message).toContain("link-monitoring service did not pass");
+	expect(calls).toEqual([
+		"https://api.ndle.app/health/ready",
+		"https://api.ndle.app/health/detailed",
+		"https://monitor.ndle.app/ready",
+		"https://api.resend.com/emails",
+	]);
+});
