@@ -28,6 +28,9 @@ function environment() {
 		MONITOR_READY_ENDPOINT: "https://monitor.ndle.app/ready",
 		CLICK_EVENTS: { metrics: async () => empty },
 		CLICK_EVENTS_FAILED: { metrics: async () => empty },
+		FAILED_CLICK_ARCHIVES: {
+			list: async () => ({ objects: [], truncated: false }),
+		},
 		ANALYTICS_BACKUPS: {
 			get: async () => ({ size: 300, json: async () => manifest }),
 			head: async () => ({ size: manifest.size }),

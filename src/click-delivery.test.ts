@@ -186,7 +186,18 @@ test("a successful HTTP status without this event's durable receipt is retried",
 	expect(mutation).not.toHaveBeenCalled();
 });
 
-test("an explicit ignored ingest receipt does not increment the live view", async () => {
+test("disabled tracking never sends personal event data downstream", async () => {
+	const send = spyOn(globalThis, "fetch");
+	const item = message({
+		version: 1,
+		event: { ...event, tracking_enabled: false },
+	});
+	await deliver(item);
+	expect(send).not.toHaveBeenCalled();
+	expect(item.ack).toHaveBeenCalledTimes(1);
+});
+
+test("ingest cannot silently ignore an event whose tracking is enabled", async () => {
 	spyOn(globalThis, "fetch").mockResolvedValue(
 		Response.json(
 			{
@@ -200,22 +211,12 @@ test("an explicit ignored ingest receipt does not increment the live view", asyn
 	const mutation = spyOn(ConvexHttpClient.prototype, "mutation");
 	const item = message();
 	await deliver(item);
-	expect(item.ack).toHaveBeenCalledTimes(1);
+	expect(item.ack).not.toHaveBeenCalled();
+	expect(item.retry).toHaveBeenCalledTimes(1);
 	expect(mutation).not.toHaveBeenCalled();
 });
 
-test("disabled tracking never sends personal event data downstream", async () => {
-	const send = spyOn(globalThis, "fetch");
-	const item = message({
-		version: 1,
-		event: { ...event, tracking_enabled: false },
-	});
-	await deliver(item);
-	expect(send).not.toHaveBeenCalled();
-	expect(item.ack).toHaveBeenCalledTimes(1);
-});
-
-test("malformed queued events are retained for retries and dead letter inspection", async () => {
+test("malformed queued events retry if durable archival is unavailable", async () => {
 	const send = spyOn(globalThis, "fetch");
 	const item = message({
 		version: 1,

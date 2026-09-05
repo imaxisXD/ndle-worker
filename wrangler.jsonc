@@ -5,7 +5,10 @@
   "compatibility_date": "2025-09-15",
   "workers_dev": false,
   "triggers": { "crons": ["*/5 * * * *"] },
-  "r2_buckets": [{ "binding": "ANALYTICS_BACKUPS", "bucket_name": "ndle-analytics" }],
+  "r2_buckets": [
+    { "binding": "ANALYTICS_BACKUPS", "bucket_name": "ndle-analytics" },
+    { "binding": "FAILED_CLICK_ARCHIVES", "bucket_name": "ndle-analytics" }
+  ],
   "queues": {
     "producers": [
       { "binding": "CLICK_EVENTS", "queue": "ndle-click-events" },
@@ -17,6 +20,12 @@
       "max_batch_timeout": 1,
       "max_retries": 12,
       "dead_letter_queue": "ndle-click-events-failed"
+    }, {
+      "queue": "ndle-click-events-failed",
+      "max_batch_size": 10,
+      "max_batch_timeout": 1,
+      "max_retries": 100,
+      "retry_delay": 43200
     }]
   },
   
@@ -36,7 +45,9 @@
     "INGEST_ENDPOINT": "https://api.ndle.app/ingest",
     "MONITOR_READY_ENDPOINT": "https://monitor.ndle.app/ready",
     "OPS_ALERTS_ENABLED": "true",
-    "WORKER_VERSION": "prod"
+    "WORKER_VERSION": "prod",
+    "CLICK_EVENTS_QUEUE_NAME": "ndle-click-events",
+    "CLICK_EVENTS_FAILED_QUEUE_NAME": "ndle-click-events-failed"
   },
   
   // Development environment
@@ -44,7 +55,10 @@
     "dev": {
       "name": "ndleworker-dev",
       "triggers": { "crons": [] },
-      "r2_buckets": [{ "binding": "ANALYTICS_BACKUPS", "bucket_name": "ndle-analytics-dev" }],
+      "r2_buckets": [
+        { "binding": "ANALYTICS_BACKUPS", "bucket_name": "ndle-analytics-dev" },
+        { "binding": "FAILED_CLICK_ARCHIVES", "bucket_name": "ndle-analytics-dev" }
+      ],
       "queues": {
         "producers": [
           { "binding": "CLICK_EVENTS", "queue": "ndle-click-events-dev" },
@@ -56,6 +70,12 @@
           "max_batch_timeout": 1,
           "max_retries": 12,
           "dead_letter_queue": "ndle-click-events-failed-dev"
+        }, {
+          "queue": "ndle-click-events-failed-dev",
+          "max_batch_size": 10,
+          "max_batch_timeout": 1,
+          "max_retries": 100,
+          "retry_delay": 43200
         }]
       },
       "routes": [
@@ -73,7 +93,9 @@
         "INGEST_ENDPOINT": "",
         "MONITOR_READY_ENDPOINT": "",
         "OPS_ALERTS_ENABLED": "false",
-        "WORKER_VERSION": "dev"
+        "WORKER_VERSION": "dev",
+        "CLICK_EVENTS_QUEUE_NAME": "ndle-click-events-dev",
+        "CLICK_EVENTS_FAILED_QUEUE_NAME": "ndle-click-events-failed-dev"
       }
     }
   },

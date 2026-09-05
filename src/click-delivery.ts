@@ -1,86 +1,15 @@
 import { ConvexHttpClient } from "convex/browser";
 import { sendAnalyticsEvent } from "./analytics";
+import { parseQueuedClick } from "./click-envelope";
 import { recordClick } from "./convex-api";
+import { archiveFailedClick } from "./failed-clicks";
 import { createLogger } from "./log";
-import type { AnalyticsEvent, Bindings, QueuedClick } from "./types";
+import type { AnalyticsEvent, Bindings } from "./types";
+
+export { parseQueuedClick } from "./click-envelope";
 
 function isRecord(value: unknown): value is Record<string, unknown> {
 	return typeof value === "object" && value !== null && !Array.isArray(value);
-}
-
-function isAnalyticsEvent(value: unknown): value is AnalyticsEvent {
-	if (!isRecord(value)) return false;
-	const strings = [
-		"idempotency_key",
-		"occurred_at",
-		"link_slug",
-		"short_url",
-		"destination_url",
-		"request_id",
-		"worker_datacenter",
-		"worker_version",
-		"user_agent",
-		"ip_hash",
-		"country",
-	];
-	const nullableStrings = [
-		"link_id",
-		"user_id",
-		"session_id",
-		"device_type",
-		"browser",
-		"os",
-		"region",
-		"city",
-		"referer",
-		"utm_source",
-		"utm_medium",
-		"utm_campaign",
-		"utm_term",
-		"utm_content",
-		"language",
-		"timezone",
-		"variant_id",
-	];
-	return (
-		strings.every((key) => typeof value[key] === "string") &&
-		nullableStrings.every(
-			(key) => value[key] === null || typeof value[key] === "string",
-		) &&
-		["tracking_enabled", "first_click_of_session", "is_bot"].every(
-			(key) => typeof value[key] === "boolean",
-		) &&
-		typeof value.latency_ms_worker === "number" &&
-		Number.isFinite(value.latency_ms_worker) &&
-		value.latency_ms_worker >= 0 &&
-		value.redirect_status === 302
-	);
-}
-
-export function parseQueuedClick(value: unknown): QueuedClick {
-	if (
-		!isRecord(value) ||
-		value.version !== 1 ||
-		!isAnalyticsEvent(value.event)
-	) {
-		throw new Error("Click event has an unsupported format");
-	}
-	const event = value.event;
-	if (
-		!/^[A-Za-z0-9_-]{1,128}$/.test(event.idempotency_key) ||
-		event.request_id !== event.idempotency_key
-	) {
-		throw new Error("Click event has an invalid or mismatched event ID");
-	}
-	if (
-		!Number.isFinite(Date.parse(event.occurred_at)) ||
-		!event.link_id ||
-		!event.user_id ||
-		!event.link_slug
-	) {
-		throw new Error("Click event is missing its time, link, or owner");
-	}
-	return { version: 1, event };
 }
 
 const terminalClickOutcomes = new Set([
@@ -114,7 +43,11 @@ export async function deliverClick(
 	if (!event.link_id) throw new Error("Click event is missing its link ID");
 	const convex = new ConvexHttpClient(env.CONVEX_URL, {
 		fetch: (input, init) =>
-			fetch(input, { ...init, signal: AbortSignal.timeout(10_000) }),
+			fetch(input, {
+				...init,
+				redirect: "manual",
+				signal: AbortSignal.timeout(10_000),
+			}),
 	});
 	const result = await convex.mutation(recordClick, {
 		sharedSecret: env.SHARED_SECRET,
@@ -155,7 +88,22 @@ export async function consumeClicks(
 		batch.messages.map(async (message) => {
 			let requestId: string | undefined;
 			try {
-				const { event } = parseQueuedClick(message.body);
+				let event: AnalyticsEvent;
+				try {
+					event = parseQueuedClick(message.body).event;
+				} catch {
+					await archiveFailedClick(
+						message,
+						batch.queue,
+						env.FAILED_CLICK_ARCHIVES,
+						"invalid_event",
+					);
+					message.ack();
+					log.error("Invalid click archived for investigation", {
+						message_id: message.id,
+					});
+					return;
+				}
 				requestId = event.idempotency_key;
 				const outcome = await deliverClick(event, env);
 				message.ack();

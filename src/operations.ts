@@ -1,3 +1,4 @@
+import { unresolvedClickPrefix } from "./failed-clicks";
 import type { Bindings } from "./types";
 
 const minute = 60_000;
@@ -11,6 +12,9 @@ const issueMessages = {
 	failed_clicks:
 		"The failed-click queue contains events that need investigation and replay.",
 	failed_queue_unavailable: "The failed-click queue could not be checked.",
+	archived_failed_clicks:
+		"Archived failed clicks still need investigation or verified replay.",
+	failed_archive_unavailable: "The failed-click archive could not be checked.",
 	ingest_unavailable:
 		"The analytics service is unavailable or reports a failed component.",
 	ingest_failed_jobs: "The analytics service has failed event jobs.",
@@ -29,6 +33,7 @@ type OperationsBindings = Pick<
 	| "CLICK_EVENTS"
 	| "CLICK_EVENTS_FAILED"
 	| "ANALYTICS_BACKUPS"
+	| "FAILED_CLICK_ARCHIVES"
 	| "API_SECRET"
 	| "INGEST_ENDPOINT"
 	| "MONITOR_READY_ENDPOINT"
@@ -194,6 +199,20 @@ export async function checkOperations(
 				count((await env.CLICK_EVENTS_FAILED.metrics()).backlogCount) > 0
 					? ["failed_clicks"]
 					: [],
+		},
+		{
+			failure: "failed_archive_unavailable",
+			run: async () => {
+				const result = await env.FAILED_CLICK_ARCHIVES.list({
+					prefix: unresolvedClickPrefix,
+					limit: 1,
+				});
+				if (!Array.isArray(result.objects))
+					throw new Error("Failed archive list is invalid");
+				return result.objects.length || result.truncated
+					? ["archived_failed_clicks"]
+					: [];
+			},
 		},
 		{ failure: "backup_unavailable", run: () => checkBackup(env, now) },
 		{

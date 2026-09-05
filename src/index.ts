@@ -1,7 +1,7 @@
 import { Redis } from "@upstash/redis/cloudflare";
 import { Hono } from "hono";
 import { normalizeAnalyticsEvent } from "./analytics";
-import { consumeClicks, parseQueuedClick } from "./click-delivery";
+import { parseQueuedClick } from "./click-envelope";
 import {
 	buildAnalyticsInput,
 	buildClientRedirectResponse,
@@ -10,6 +10,7 @@ import {
 } from "./helper";
 import { createRequestLogger } from "./log";
 import { checkOperations } from "./operations";
+import { consumeQueue } from "./queue-handler";
 import { decideRedirect } from "./redirect-decision";
 import type { Bindings, RedisValueObject } from "./types";
 
@@ -94,7 +95,7 @@ app.get("/:websiteSlug{[A-Za-z0-9_-]+}", async (c) => {
 
 export default {
 	fetch: app.fetch,
-	queue: consumeClicks,
+	queue: consumeQueue,
 	async scheduled(_controller, env) {
 		await checkOperations(env);
 	},

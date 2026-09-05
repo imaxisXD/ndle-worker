@@ -64,6 +64,7 @@ export async function sendAnalyticsEvent(params: {
 
 	const response = await doFetch(endpoint, {
 		method: "POST",
+		redirect: "manual",
 		headers: {
 			Authorization: `Bearer ${token}`,
 			"Content-Type": "application/json",
@@ -84,7 +85,8 @@ export async function sendAnalyticsEvent(params: {
 		!("idempotency_key" in result) ||
 		result.idempotency_key !== payload.idempotency_key ||
 		!("status" in result) ||
-		(result.status !== "queued" && result.status !== "ignored")
+		(result.status !== "queued" && result.status !== "ignored") ||
+		(payload.tracking_enabled && result.status !== "queued")
 	)
 		throw new Error(
 			"Analytics delivery did not confirm this event was accepted",

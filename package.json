@@ -3,6 +3,7 @@
   "type": "module",
   "scripts": {
     "test": "bun test",
+    "test:runtime": "node scripts/failed-clicks.runtime.mjs",
     "typecheck": "tsc --noEmit",
     "dev": "wrangler dev --env dev",
     "deploy:dry-run": "wrangler deploy --env=\"\" --dry-run",
