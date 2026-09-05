@@ -20,7 +20,7 @@ type RedirectDecision =
 	  }
 	| {
 			kind: "blocked";
-			reason: RedirectBlockReason;
+			reason: RedirectBlockReason | "invalid destination";
 	  };
 
 async function buildVariantSessionId(
@@ -49,7 +49,12 @@ async function decideRedirect(params: {
 		return { kind: "blocked", reason: "missing destination" };
 	}
 
-	let destination = assertSafeDestinationUrl(destinationText);
+	let destination: URL;
+	try {
+		destination = assertSafeDestinationUrl(destinationText);
+	} catch {
+		return { kind: "blocked", reason: "invalid destination" };
+	}
 	let variantId: string | null = null;
 	const abConfig = redisValue?.rules?.ab_test;
 

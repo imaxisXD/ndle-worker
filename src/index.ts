@@ -1,5 +1,4 @@
 import {
-	assertSafeDestinationUrl,
 	buildAnalyticsInput,
 	buildClientRedirectResponse,
 	buildNoContentResponse,
@@ -8,19 +7,13 @@ import {
 } from "@helper";
 import { Redis } from "@upstash/redis/cloudflare";
 import { ConvexHttpClient } from "convex/browser";
-import { type Context, Hono } from "hono";
+import { Hono } from "hono";
 import { sendAnalyticsEvent } from "./analytics";
-import { createRequestLogger, type RequestLogger } from "./log";
+import { createRequestLogger } from "./log";
 import { decideRedirect } from "./redirect-decision";
-import type { Bindings as EnvBindings, RedisValueObject } from "./types";
-
-type Bindings = EnvBindings;
+import type { Bindings, RedisValueObject } from "./types";
 
 const app = new Hono<{ Bindings: Bindings }>();
-
-function createConvexClient(convexUrl: string): ConvexHttpClient {
-	return new ConvexHttpClient(convexUrl);
-}
 
 app.get("/favicon.ico", () => buildNoContentResponse());
 app.get("/apple-touch-icon.png", () => buildNoContentResponse());
@@ -35,42 +28,6 @@ app.get(
 			headers: { "Cache-Control": "public, max-age=86400" },
 		}),
 );
-
-/**
- * Get the full short-link object from Redis and its destination URL.
- * Reads Redis once and returns both values for reuse by callers.
- */
-async function getUrlFromRedis(
-	c: Context,
-	log?: RequestLogger,
-): Promise<{ url: URL; redisValue: RedisValueObject } | undefined> {
-	const slug = c.req.param("websiteSlug");
-	if (!slug) {
-		log?.warn("Missing slug while looking up Redis");
-		return undefined;
-	}
-	const redis = Redis.fromEnv(c.env);
-	log?.debug("Looking up slug in Redis", { slug });
-	const value = await redis.json.get<RedisValueObject>(slug);
-
-	if (value?.destination) {
-		try {
-			const url = assertSafeDestinationUrl(value.destination);
-			log?.info("Found destination in Redis", {
-				slug,
-				destination: url.toString(),
-			});
-			return { url, redisValue: value };
-		} catch (_err) {
-			log?.warn("Destination in Redis is not a valid URL", {
-				slug,
-				destination: value.destination,
-			});
-			return undefined;
-		}
-	}
-	log?.info("No Redis entry for slug", { slug });
-}
 
 app.get("/:websiteSlug{[A-Za-z0-9_-]+}", async (c) => {
 	const start = Date.now();
@@ -94,20 +51,18 @@ app.get("/:websiteSlug{[A-Za-z0-9_-]+}", async (c) => {
 	}
 
 	// Create Convex client using environment variable
-	const convex = createConvexClient(c.env.CONVEX_URL);
+	const convex = new ConvexHttpClient(c.env.CONVEX_URL);
 
 	log.info("Looking up redirect in Redis", { request_id: requestId });
-	const redisResult = await getUrlFromRedis(
-		c,
-		log.child({ component: "redis" }),
+	const redisValue = await Redis.fromEnv(c.env).json.get<RedisValueObject>(
+		slug,
 	);
 
-	if (!redisResult?.url) {
+	if (!redisValue) {
 		log.warn("Slug not found", { request_id: requestId });
 		return c.notFound();
 	}
 
-	const redisValue = redisResult.redisValue;
 	const decision = await decideRedirect({
 		redisValue,
 		readHeader: (name) => c.req.header(name) ?? undefined,

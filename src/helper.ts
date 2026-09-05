@@ -1,7 +1,7 @@
 import { Redis } from "@upstash/redis/cloudflare";
 import type { ConvexHttpClient } from "convex/browser";
 import type { Context } from "hono";
-import { api } from "./convex-api";
+import { recordClick } from "./convex-api";
 import { createRequestLogger } from "./log";
 import type { AnalyticsEventInput, RedisValueObject } from "./types";
 
@@ -505,7 +505,7 @@ async function recordClickInConvex(
 		crypto.randomUUID();
 
 	try {
-		await convex.mutation(api.urlAnalytics.mutateUrlAnalytics, {
+		await convex.mutation(recordClick, {
 			sharedSecret: c.env.SHARED_SECRET,
 			urlId,
 			urlStatusCode: 0,

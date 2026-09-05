@@ -58,6 +58,18 @@ test("blocks expired links", async () => {
 	});
 });
 
+test("blocks an invalid stored destination without throwing", async () => {
+	const decision = await decideRedirect({
+		redisValue: { ...activeLink, destination: "not a URL" },
+		readHeader,
+	});
+
+	assert.deepEqual(decision, {
+		kind: "blocked",
+		reason: "invalid destination",
+	});
+});
+
 test("keeps existing UTM values and adds missing ones", async () => {
 	const decision = await decideRedirect({
 		redisValue: activeLink,
