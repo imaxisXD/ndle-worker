@@ -85,7 +85,7 @@ export default { async fetch(request, bindings) {
       return storage.get(key);
     },
     delete: key => storage.delete(key),
-    list: options => { calls.push({ method: "list", options }); return storage.list(options); }
+    list: options => { calls.push({ method: "list", options }); return args.cleanArchive ? Promise.resolve({ objects: [], truncated: false }) : storage.list(options); }
   };
   const env = { ...bindings, FAILED_CLICK_ARCHIVES: bucket,
     CLICK_EVENTS_QUEUE_NAME: ${JSON.stringify(mainQueue)}, CLICK_EVENTS_FAILED_QUEUE_NAME: ${JSON.stringify(failedQueue)},
@@ -97,12 +97,16 @@ export default { async fetch(request, bindings) {
     OPS_ALERT_FROM: "NDLE <alerts@example.test>", OPS_ALERT_TO: "owner@example.test", RESEND_API_KEY: "FAKE-email-key",
     ANALYTICS_BACKUPS: { get: async () => ({ size: 300, json: async () => ({ version: 3, key: "snapshots/duckdb/fixture/analytics.duckdb", size: 1024, sha256: "a".repeat(64), createdAt: "2026-09-05T18:00:00.000Z" }) }), head: async () => ({ size: 1024 }) }
   };
+  const operationsFetch = async (input, init) => {
+    if (args.healthNetworkFailure && new URL(input).pathname === "/health/detailed") throw new Error("Injected connection failure");
+    return fetch(input, init);
+  };
   try {
     let result;
     if (args.action === "replay") result = await replayFailedClick(args.key, bucket, env.CLICK_EVENTS);
     else if (args.action === "resolve") result = await resolveFailedClick(args.key, bucket, env, args.operator);
     else if (args.action === "resolve-invalid") result = await resolveInvalidFailedClick(args.key, bucket, args.decision);
-    else if (args.action === "operations") await checkOperations(env, Date.parse("2026-09-05T18:05:00Z"));
+    else if (args.action === "operations") await checkOperations(env, Date.parse("2026-09-05T18:05:00Z"), operationsFetch, 12_000, args.realConfirmationTimer ? undefined : async delayMs => { calls.push({ method: "confirmation-wait", delayMs }); await new Promise(resolve => setTimeout(resolve, 1)); });
     else await consumeQueue({ queue: args.queue || ${JSON.stringify(failedQueue)}, messages: [{
       id: args.id, timestamp: new Date("2026-09-05T18:01:00Z"), attempts: args.attempts || 1,
       body: args.body || ${JSON.stringify(original)},
@@ -121,6 +125,32 @@ const bundled = await build({
 	platform: "browser",
 	target: "es2022",
 });
+const healthyOperations = {
+	status: "ok",
+	checks: {
+		queue: { status: "ok", details: { waiting: 0, failed: 0 } },
+		duckdb: { status: "ok" },
+		batch_writer: { status: "ok" },
+		archiver: { status: "ok" },
+		backup: { status: "ok" },
+		recovery: { status: "ok", details: {} },
+	},
+};
+const recoveryFailure = {
+	...healthyOperations,
+	status: "degraded",
+	checks: {
+		...healthyOperations.checks,
+		recovery: {
+			status: "degraded",
+			details: {
+				unavailable: true,
+				auditOverdue: true,
+				lastError: "PRIVATE-service-secret",
+			},
+		},
+	},
+};
 let scenario = {};
 let outbound = [];
 const ingestIds = new Set();
@@ -209,11 +239,22 @@ const runtime = new Miniflare({
 				logLines: [],
 			});
 		}
-		if (url.pathname === "/health/detailed")
-			return Response.json({
-				status: "ok",
-				checks: { queue: { details: { waiting: 0, failed: 0 } } },
+		if (url.pathname === "/health/detailed") {
+			if (scenario.healthRedirect)
+				return new Response(null, {
+					status: 302,
+					headers: { Location: "https://unexpected.example.test/health" },
+				});
+			const index =
+				outbound.filter(
+					(call) => new URL(call.url).pathname === "/health/detailed",
+				).length - 1;
+			const samples = scenario.healthSamples || [healthyOperations];
+			const sample = samples[Math.min(index, samples.length - 1)];
+			return Response.json(sample, {
+				status: sample.status === "ok" ? 200 : 503,
 			});
+		}
 		if (
 			url.pathname === "/health/ready" ||
 			url.hostname === "monitor.example.test"
@@ -221,6 +262,14 @@ const runtime = new Miniflare({
 			return Response.json({ status: "ready" });
 		if (url.hostname === "api.resend.com") {
 			outbound.at(-1).email = await request.json();
+			if (scenario.emailRedirect)
+				return Response.json(
+					{ id: "not-accepted" },
+					{
+						status: 302,
+						headers: { Location: "https://unexpected.example.test/email" },
+					},
+				);
 			return Response.json({ id: "isolated-alert" });
 		}
 		throw new Error("Unexpected outbound request blocked: " + request.url);
@@ -349,6 +398,138 @@ try {
 			);
 		},
 	);
+	await run(
+		"healthy operations skip both confirmation and email in workerd",
+		{ action: "operations", cleanArchive: true },
+		(result) => {
+			assert.equal(result.accepted, true);
+			assert.equal(
+				result.calls.some((call) => call.method === "confirmation-wait"),
+				false,
+			);
+			assert.equal(outbound.length, 3);
+			assert.equal(
+				outbound.some((call) => call.email),
+				false,
+			);
+		},
+	);
+	const confirmationStarted = Date.now();
+	await run(
+		"temporary recovery failure clears after the real 15-second workerd timer",
+		{
+			action: "operations",
+			cleanArchive: true,
+			healthSamples: [recoveryFailure, healthyOperations],
+			realConfirmationTimer: true,
+		},
+		(result) => {
+			assert.equal(result.accepted, true);
+			assert.ok(Date.now() - confirmationStarted >= 15_000);
+			assert.equal(
+				outbound.filter(
+					(call) => new URL(call.url).pathname === "/health/detailed",
+				).length,
+				2,
+			);
+			assert.equal(
+				outbound.filter(
+					(call) => new URL(call.url).hostname === "monitor.example.test",
+				).length,
+				1,
+			);
+			assert.equal(
+				outbound.some((call) => call.email),
+				false,
+			);
+		},
+	);
+	await run(
+		"persistent recovery failures send specific safe messages after one confirmation",
+		{
+			action: "operations",
+			cleanArchive: true,
+			healthSamples: [recoveryFailure],
+		},
+		(result) => {
+			assert.equal(result.accepted, true);
+			assert.deepEqual(
+				result.calls.filter((call) => call.method === "confirmation-wait"),
+				[{ method: "confirmation-wait", delayMs: 15_000 }],
+			);
+			const emails = outbound.filter((call) => call.email);
+			assert.equal(emails.length, 1);
+			assert.match(emails[0].email.text, /scan of saved events is overdue/);
+			assert.match(emails[0].email.text, /has not completed a recent check/);
+			assert.doesNotMatch(emails[0].email.text, /PRIVATE-service-secret/);
+		},
+	);
+	await run(
+		"health recovery retains initially failed jobs and actual unresolved R2 archives",
+		{
+			action: "operations",
+			healthSamples: [
+				{
+					...recoveryFailure,
+					checks: {
+						...recoveryFailure.checks,
+						queue: { status: "ok", details: { waiting: 0, failed: 1 } },
+					},
+				},
+				healthyOperations,
+			],
+		},
+		(result) => {
+			assert.equal(result.accepted, true);
+			const emails = outbound.filter((call) => call.email);
+			assert.equal(emails.length, 1);
+			assert.match(emails[0].email.text, /failed event jobs/);
+			assert.match(emails[0].email.text, /Archived failed clicks/);
+			assert.doesNotMatch(emails[0].email.text, /recovery check failed/);
+		},
+	);
+	await run(
+		"workerd network failures have their own health-check alert",
+		{ action: "operations", cleanArchive: true, healthNetworkFailure: true },
+		(result) => {
+			assert.equal(result.accepted, true);
+			assert.equal(outbound.filter((call) => call.email).length, 1);
+			assert.match(
+				outbound.find((call) => call.email).email.text,
+				/could not connect/,
+			);
+		},
+	);
+	await run(
+		"workerd health and email redirects never forward credentials",
+		{
+			action: "operations",
+			cleanArchive: true,
+			healthRedirect: true,
+			emailRedirect: true,
+		},
+		(result) => {
+			assert.equal(result.accepted, false);
+			assert.match(result.error, /email was not accepted \(HTTP 302\)/);
+			assert.match(
+				outbound.find((call) => call.email).email.text,
+				/unexpected HTTP status/,
+			);
+			assert.equal(
+				outbound.some(
+					(call) => new URL(call.url).hostname === "unexpected.example.test",
+				),
+				false,
+			);
+			assert.equal(
+				outbound.filter(
+					(call) => new URL(call.url).pathname === "/health/detailed",
+				).length,
+				2,
+			);
+		},
+	);
+
 	for (let attempt = 0; attempt < 2; attempt++) {
 		await run(
 			"manual replay keeps old v1 envelope exactly (attempt " + attempt + ")",

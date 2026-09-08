@@ -15,8 +15,40 @@ const issueMessages = {
 	archived_failed_clicks:
 		"Archived failed clicks still need investigation or verified replay.",
 	failed_archive_unavailable: "The failed-click archive could not be checked.",
-	ingest_unavailable:
-		"The analytics service is unavailable or reports a failed component.",
+	ingest_health_transport:
+		"The analytics health check could not connect to the service.",
+	ingest_health_http:
+		"The analytics health check returned an unexpected HTTP status.",
+	ingest_health_invalid:
+		"The analytics health check returned an invalid response.",
+	ingest_health_timeout:
+		"The analytics health check did not finish before its deadline.",
+	ingest_not_ready:
+		"The analytics service reports that it is not ready to accept events.",
+	ingest_health_failed:
+		"The analytics service reports an unhealthy state without a named failed component.",
+	ingest_queue_health: "The analytics service cannot read its event queue.",
+	ingest_database_health: "The analytics database check failed.",
+	ingest_writer_health:
+		"The analytics event writer reports a failed or delayed commit.",
+	ingest_archiver_health: "The analytics archive check failed.",
+	ingest_backup_health:
+		"The analytics service reports a database backup failure.",
+	ingest_recovery_health: "The analytics recovery check failed.",
+	ingest_recovery_overdue:
+		"Analytics events have waited too long for recovery.",
+	ingest_recovery_stalled:
+		"The analytics recovery process has stopped making progress.",
+	ingest_recovery_unavailable:
+		"The analytics recovery process has not completed a recent check.",
+	ingest_recovery_records:
+		"Analytics recovery found event records that need investigation.",
+	ingest_recovery_scan_overdue:
+		"The analytics recovery scan of saved events is overdue.",
+	ingest_recovery_error:
+		"The analytics recovery process reports a recent error.",
+	ingest_recovery_scan_error:
+		"The analytics recovery scan of saved events reports a recent error.",
 	ingest_failed_jobs: "The analytics service has failed event jobs.",
 	ingest_queue_large:
 		"The analytics service has more than 1,000 waiting event jobs.",
@@ -95,15 +127,223 @@ export function checkClickQueue(metrics: QueueMetrics, now: number): Issue[] {
 	return issues;
 }
 
-export function checkIngestHealth(value: unknown): Issue[] {
+const componentIssues = {
+	queue: "ingest_queue_health",
+	duckdb: "ingest_database_health",
+	batch_writer: "ingest_writer_health",
+	archiver: "ingest_archiver_health",
+	backup: "ingest_backup_health",
+	recovery: "ingest_recovery_health",
+} as const satisfies Record<string, Issue>;
+const recoveryIssues = {
+	overdue: "ingest_recovery_overdue",
+	stalled: "ingest_recovery_stalled",
+	unavailable: "ingest_recovery_unavailable",
+	problemRecordsPresent: "ingest_recovery_records",
+	auditOverdue: "ingest_recovery_scan_overdue",
+	lastError: "ingest_recovery_error",
+	auditLastError: "ingest_recovery_scan_error",
+} as const satisfies Record<string, Issue>;
+type HealthStatus = "ok" | "degraded" | "error" | "invalid";
+type IngestEvidence = {
+	endpoint: "ready" | "detailed";
+	result:
+		| "reported"
+		| "http_error"
+		| "transport_error"
+		| "invalid_response"
+		| "timeout";
+	http_status?: number;
+	timeout_ms?: number;
+	status?: HealthStatus | "ready" | "not_ready";
+	failed_components?: Array<keyof typeof componentIssues>;
+	recovery_reasons?: Array<keyof typeof recoveryIssues>;
+};
+type IngestCheck = { issues: Issue[]; evidence: IngestEvidence };
+
+function healthStatus(value: unknown): HealthStatus {
+	return value === "ok" || value === "degraded" || value === "error"
+		? value
+		: "invalid";
+}
+
+function inspectIngestHealth(value: unknown): Omit<IngestCheck, "evidence"> & {
+	evidence: Pick<
+		IngestEvidence,
+		"status" | "failed_components" | "recovery_reasons"
+	>;
+} {
 	const health = record(value);
 	const checks = record(health.checks);
-	const queue = record(record(checks.queue).details);
+	const status = healthStatus(health.status);
 	const issues: Issue[] = [];
-	if (health.status !== "ok") issues.push("ingest_unavailable");
-	if (count(queue.failed) > 0) issues.push("ingest_failed_jobs");
-	if (count(queue.waiting) > 1_000) issues.push("ingest_queue_large");
-	return issues;
+	const failed: Array<keyof typeof componentIssues> = [];
+	const reasons: Array<keyof typeof recoveryIssues> = [];
+	if (status === "invalid") issues.push("ingest_health_invalid");
+	for (const component of Object.keys(componentIssues) as Array<
+		keyof typeof componentIssues
+	>) {
+		try {
+			const check = record(checks[component]);
+			const componentStatus = healthStatus(check.status);
+			if (componentStatus === "invalid") issues.push("ingest_health_invalid");
+			else if (componentStatus !== "ok") {
+				failed.push(component);
+				issues.push(componentIssues[component]);
+			}
+			if (component === "queue" && componentStatus === "ok") {
+				const queue = record(check.details);
+				if (count(queue.failed) > 0) issues.push("ingest_failed_jobs");
+				if (count(queue.waiting) > 1_000) issues.push("ingest_queue_large");
+			}
+			if (
+				component === "recovery" &&
+				componentStatus !== "ok" &&
+				componentStatus !== "invalid"
+			) {
+				const details = record(check.details);
+				for (const reason of Object.keys(recoveryIssues) as Array<
+					keyof typeof recoveryIssues
+				>) {
+					// Only known flags and the presence of an error are safe to emit.
+					// Never copy error text, arbitrary keys, or recovery object paths.
+					const present =
+						reason === "lastError" || reason === "auditLastError"
+							? typeof details[reason] === "string" &&
+								details[reason].length > 0
+							: details[reason] === true;
+					if (present) {
+						reasons.push(reason);
+						issues.push(recoveryIssues[reason]);
+					}
+				}
+			}
+		} catch {
+			// Keep any independently observed failures even if another field is bad.
+			issues.push("ingest_health_invalid");
+		}
+	}
+	if (status !== "ok" && status !== "invalid" && !failed.length)
+		issues.push("ingest_health_failed");
+	return {
+		issues: [...new Set(issues)],
+		evidence: { status, failed_components: failed, recovery_reasons: reasons },
+	};
+}
+
+export function checkIngestHealth(value: unknown): Issue[] {
+	return inspectIngestHealth(value).issues;
+}
+
+async function readIngestEndpoint(
+	env: OperationsBindings,
+	endpoint: IngestEvidence["endpoint"],
+	sendRequest: typeof fetch,
+	checkTimeoutMs: number,
+): Promise<IngestCheck> {
+	try {
+		return await withDeadline(async () => {
+			const signal = AbortSignal.timeout(10_000);
+			let response: Response;
+			try {
+				response = await sendRequest(
+					new URL(`/health/${endpoint}`, env.INGEST_ENDPOINT),
+					{
+						...(endpoint === "detailed"
+							? { headers: { Authorization: `Bearer ${env.API_SECRET}` } }
+							: {}),
+						signal,
+						redirect: "manual",
+					},
+				);
+			} catch {
+				if (signal.aborted)
+					return {
+						issues: ["ingest_health_timeout"],
+						evidence: { endpoint, result: "timeout", timeout_ms: 10_000 },
+					};
+				return {
+					issues: ["ingest_health_transport"],
+					evidence: { endpoint, result: "transport_error" },
+				};
+			}
+			const evidence = { endpoint, http_status: response.status };
+			if (response.status !== 200 && response.status !== 503) {
+				await response.body?.cancel();
+				return {
+					issues: ["ingest_health_http"],
+					evidence: { ...evidence, result: "http_error" },
+				};
+			}
+			try {
+				const value = await readJson(response);
+				if (endpoint === "detailed") {
+					const details = inspectIngestHealth(value);
+					// A 503 with a wholly healthy body is still a failed HTTP check.
+					if (
+						response.status === 503 &&
+						details.evidence.status === "ok" &&
+						!details.evidence.failed_components?.length
+					)
+						details.issues.push("ingest_health_http");
+					return {
+						issues: details.issues,
+						evidence: { ...evidence, ...details.evidence, result: "reported" },
+					};
+				}
+				const status = record(value).status;
+				if (status !== "ready" && status !== "not_ready")
+					throw new Error("Invalid readiness response");
+				return {
+					issues:
+						status === "not_ready"
+							? ["ingest_not_ready"]
+							: response.status === 200
+								? []
+								: ["ingest_health_http"],
+					evidence: { ...evidence, status, result: "reported" },
+				};
+			} catch {
+				if (signal.aborted)
+					return {
+						issues: ["ingest_health_timeout"],
+						evidence: { ...evidence, result: "timeout", timeout_ms: 10_000 },
+					};
+				return {
+					issues: ["ingest_health_invalid"],
+					evidence: { ...evidence, result: "invalid_response" },
+				};
+			}
+		}, checkTimeoutMs);
+	} catch {
+		return {
+			issues: ["ingest_health_timeout"],
+			evidence: { endpoint, result: "timeout", timeout_ms: checkTimeoutMs },
+		};
+	}
+}
+
+function needsHealthConfirmation(issue: Issue): boolean {
+	return (
+		issue !== "ingest_failed_jobs" &&
+		issue !== "ingest_queue_large" &&
+		issue !== "ingest_recovery_records"
+	);
+}
+
+async function checkIngest(
+	env: OperationsBindings,
+	sendRequest: typeof fetch,
+	checkTimeoutMs: number,
+) {
+	const checks = await Promise.all([
+		readIngestEndpoint(env, "ready", sendRequest, checkTimeoutMs),
+		readIngestEndpoint(env, "detailed", sendRequest, checkTimeoutMs),
+	]);
+	return {
+		issues: [...new Set(checks.flatMap((check) => check.issues))],
+		evidence: checks.map((check) => check.evidence),
+	};
 }
 
 async function checkBackup(
@@ -183,6 +423,8 @@ export async function checkOperations(
 	now = Date.now(),
 	sendRequest: typeof fetch = fetch,
 	checkTimeoutMs = 12_000,
+	waitForConfirmation: (delayMs: number) => Promise<void> = (delayMs) =>
+		new Promise((resolve) => setTimeout(resolve, delayMs)),
 ): Promise<void> {
 	if (env.OPS_ALERTS_ENABLED !== "true") return;
 	if (!env.RESEND_API_KEY || !env.OPS_ALERT_FROM || !env.OPS_ALERT_TO) {
@@ -216,28 +458,6 @@ export async function checkOperations(
 		},
 		{ failure: "backup_unavailable", run: () => checkBackup(env, now) },
 		{
-			failure: "ingest_unavailable",
-			run: async () => {
-				const [ready, response] = await Promise.all([
-					sendRequest(new URL("/health/ready", env.INGEST_ENDPOINT), {
-						signal: AbortSignal.timeout(10_000),
-						redirect: "manual",
-					}),
-					sendRequest(new URL("/health/detailed", env.INGEST_ENDPOINT), {
-						headers: { Authorization: `Bearer ${env.API_SECRET}` },
-						signal: AbortSignal.timeout(10_000),
-						redirect: "manual",
-					}),
-				]);
-				if (response.status !== 200 && response.status !== 503)
-					throw new Error("Ingest check failed");
-				const issues = checkIngestHealth(await readJson(response));
-				if (!ready.ok || record(await readJson(ready)).status !== "ready")
-					issues.push("ingest_unavailable");
-				return issues;
-			},
-		},
-		{
 			failure: "monitor_unavailable",
 			run: async () => {
 				const response = await sendRequest(env.MONITOR_READY_ENDPOINT, {
@@ -249,14 +469,56 @@ export async function checkOperations(
 			},
 		},
 	] satisfies Array<{ failure: Issue; run: () => Promise<Issue[]> }>;
-	const results = await Promise.allSettled(
-		checkSources.map((check) => withDeadline(check.run, checkTimeoutMs)),
-	);
-	const issues = results.flatMap((result, index) =>
+	const [results, initialIngest] = await Promise.all([
+		Promise.allSettled(
+			checkSources.map((check) => withDeadline(check.run, checkTimeoutMs)),
+		),
+		checkIngest(env, sendRequest, checkTimeoutMs),
+	]);
+	const otherIssues = results.flatMap((result, index) =>
 		result.status === "fulfilled"
 			? result.value
 			: [checkSources[index].failure],
 	);
+	const confirmationNeeded = initialIngest.issues.some(needsHealthConfirmation);
+	console.info(
+		JSON.stringify({
+			message: "NDLE analytics health checked",
+			phase: "initial",
+			issues: initialIngest.issues,
+			checks: initialIngest.evidence,
+			confirmation_needed: confirmationNeeded,
+			scheduled_at: new Date(now).toISOString(),
+			checked_at: new Date().toISOString(),
+		}),
+	);
+	let ingest = initialIngest;
+	if (confirmationNeeded) {
+		await waitForConfirmation(15_000);
+		ingest = await checkIngest(env, sendRequest, checkTimeoutMs);
+		console.info(
+			JSON.stringify({
+				message: "NDLE analytics health checked",
+				phase: "confirmation",
+				issues: ingest.issues,
+				checks: ingest.evidence,
+				delay_ms: 15_000,
+				scheduled_at: new Date(now).toISOString(),
+				checked_at: new Date().toISOString(),
+			}),
+		);
+	}
+	// A health recovery must never erase failed jobs or other independently
+	// observed problems. Only transient health issues are replaced by the recheck.
+	const issues = [
+		...new Set([
+			...otherIssues,
+			...initialIngest.issues.filter(
+				(issue) => !needsHealthConfirmation(issue),
+			),
+			...ingest.issues,
+		]),
+	];
 	console.info(
 		JSON.stringify({
 			message: "NDLE operations checked",

@@ -156,10 +156,21 @@ readiness, and a missing/invalid backup or a latest backup older than 26 hours.
 The backup check reads only the latest manifest and the referenced object's
 metadata; checksum verification remains the database owner's backup duty.
 
-Each source has its own 12-second deadline. A source failure or timeout becomes
-an unavailable alert while the other checks finish. HTTP requests have their
-own ten-second timeout and cannot follow redirects. No event bodies, owner data
-or credentials are included in email or alert logs.
+Each source, including each ingest health endpoint, has its own 12-second
+deadline. HTTP requests have their own ten-second timeout and cannot follow
+redirects. Ingest alerts distinguish a failed connection, unexpected HTTP
+status, invalid response, timeout, or a service-reported failure. Known component
+and recovery reason codes identify database, queue, writer, backup, archive,
+and recovery problems. Logs include only fixed status, component and reason
+fields; raw exception text, event bodies, owner data and credentials are omitted.
+
+An ingest health failure is checked once more after 15 seconds before sending
+one combined email. A healthy second sample clears that temporary health alert.
+Initial failed-job counts, recovery records needing investigation, queue,
+unresolved archive, backup and monitoring issues are always retained. When ingest
+health is healthy, those other alerts send without the confirmation delay. Both health samples are logged, including
+failures that recover. This adds no notification database or cross-run state;
+the next five-minute check remains independent.
 
 Healthy checks send no email. A stable issue set, recipient and sender use the
 same provider idempotency key within a UTC hour, avoiding duplicate mail on
