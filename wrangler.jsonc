@@ -32,12 +32,16 @@
   // Production environment (default)
   "routes": [
     {
-      "pattern": "ndle.im/*",
-      "zone_name": "ndle.im"
+      "pattern": "ndle.fyi",
+      "custom_domain": true
     },
     {
-      "pattern": "www.ndle.im/*",
-      "zone_name": "ndle.im"
+      "pattern": "www.ndle.fyi",
+      "custom_domain": true
+    },
+    {
+      "pattern": "*/*",
+      "zone_name": "ndle.fyi"
     }
   ],
   "vars": {
@@ -80,12 +84,12 @@
       },
       "routes": [
         {
-          "pattern": "dev.ndle.im/*",
-          "zone_name": "ndle.im"
+          "pattern": "dev.ndle.fyi/*",
+          "zone_name": "ndle.fyi"
         },
         {
-          "pattern": "www.dev.ndle.im/*",
-          "zone_name": "ndle.im"
+          "pattern": "www.dev.ndle.fyi/*",
+          "zone_name": "ndle.fyi"
         }
       ],
       "vars": {
