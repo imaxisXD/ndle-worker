@@ -14,11 +14,15 @@
       { "binding": "CLICK_EVENTS", "queue": "ndle-click-events" },
       { "binding": "CLICK_EVENTS_FAILED", "queue": "ndle-click-events-failed" }
     ],
+    // One ingest batch request per delivery. With the consumer's retry delay
+    // (10 s doubling to a 1 h cap), 30 retries tolerate a ~22.4 h (80,710 s)
+    // ingest outage before a click reaches the failed-click queue; 12 covered ~4.4 h.
     "consumers": [{
       "queue": "ndle-click-events",
-      "max_batch_size": 10,
-      "max_batch_timeout": 1,
-      "max_retries": 12,
+      "max_batch_size": 100,
+      "max_batch_timeout": 5,
+      "max_concurrency": 2,
+      "max_retries": 30,
       "dead_letter_queue": "ndle-click-events-failed"
     }, {
       "queue": "ndle-click-events-failed",
@@ -72,9 +76,10 @@
         ],
         "consumers": [{
           "queue": "ndle-click-events-dev",
-          "max_batch_size": 10,
-          "max_batch_timeout": 1,
-          "max_retries": 12,
+          "max_batch_size": 100,
+          "max_batch_timeout": 5,
+          "max_concurrency": 2,
+          "max_retries": 30,
           "dead_letter_queue": "ndle-click-events-failed-dev"
         }, {
           "queue": "ndle-click-events-failed-dev",

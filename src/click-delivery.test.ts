@@ -55,31 +55,94 @@ const env = {
 	LOG_LEVEL: "error",
 } as Bindings;
 
-function message(body: unknown = { version: 1, event }) {
+function message(
+	body: unknown = { version: 1, event },
+	id = "queue-message-1",
+) {
 	return {
 		body,
-		id: "queue-message-1",
+		id,
 		attempts: 1,
 		timestamp: new Date(),
 		ack: mock(),
 		retry: mock(),
 	};
 }
-async function deliver(item: ReturnType<typeof message>) {
-	await consumeClicks(
-		{ queue: "test", messages: [item], ackAll() {}, retryAll() {} },
-		env,
+function click(id: string, fields: Partial<AnalyticsEvent> = {}) {
+	return message(
+		{
+			version: 1,
+			event: { ...event, ...fields, idempotency_key: id, request_id: id },
+		},
+		`message-${id}`,
 	);
 }
+async function consume(
+	items: Array<ReturnType<typeof message>>,
+	bindings: Bindings = env,
+) {
+	await consumeClicks(
+		{ queue: "test", messages: items, ackAll() {}, retryAll() {} },
+		bindings,
+	);
+}
+async function deliver(item: ReturnType<typeof message>) {
+	await consume([item]);
+}
+
+type IngestRequest = {
+	path: string;
+	authorization: string | null;
+	events: AnalyticsEvent[];
+};
+// Intercepts ingest HTTP. Batch bodies are `{ events }`; single bodies are one event.
+function mockIngest(
+	respond: (
+		request: IngestRequest,
+	) => Response | undefined | Promise<Response | undefined>,
+) {
+	const requests: IngestRequest[] = [];
+	spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
+		const path = new URL(String(input)).pathname;
+		const body = JSON.parse(String(init?.body));
+		const request = {
+			path,
+			authorization: new Headers(init?.headers).get("Authorization"),
+			events: path.endsWith("/batch") ? body.events : [body],
+		};
+		requests.push(request);
+		return (await respond(request)) ?? batchResults(request);
+	});
+	return requests;
+}
+function batchResults(
+	{ events }: IngestRequest,
+	status: (event: AnalyticsEvent) => string = () => "recorded",
+) {
+	return Response.json({
+		success: true,
+		results: events.map((item, index) => ({
+			index,
+			idempotency_key: item.idempotency_key,
+			status: status(item),
+		})),
+	});
+}
+function recordInConvex(outcome: unknown = { outcome: "recorded" }) {
+	return spyOn(ConvexHttpClient.prototype, "mutation").mockResolvedValue(
+		outcome,
+	);
+}
+const convexRequestIds = (mutation: ReturnType<typeof recordInConvex>) =>
+	mutation.mock.calls.map(
+		(call) => (call[1] as { requestId: string }).requestId,
+	);
 
 test("retries a rejected ingest response without acknowledging or updating live counts", async () => {
 	const send = spyOn(globalThis, "fetch").mockResolvedValue(
 		new Response(null, { status: 503 }),
 	);
-	const mutation = spyOn(
-		ConvexHttpClient.prototype,
-		"mutation",
-	).mockResolvedValue({ outcome: "recorded" });
+	const mutation = recordInConvex();
 	const item = message();
 	await deliver(item);
 	expect(send).toHaveBeenCalledTimes(1);
@@ -98,19 +161,8 @@ test("retries network errors instead of losing the queued event", async () => {
 	expect(item.retry).toHaveBeenCalledTimes(1);
 });
 
-test("replay keeps one event ID when Convex fails after ingest accepts", async () => {
-	const deliveredIds: string[] = [];
-	spyOn(globalThis, "fetch").mockImplementation(async (_url, init) => {
-		deliveredIds.push(JSON.parse(String(init?.body)).idempotency_key);
-		return Response.json(
-			{
-				success: true,
-				status: "queued",
-				idempotency_key: event.idempotency_key,
-			},
-			{ status: 202 },
-		);
-	});
+test("replay keeps one event ID when Convex fails after ingest commits", async () => {
+	const requests = mockIngest(() => undefined);
 	const mutation = spyOn(ConvexHttpClient.prototype, "mutation")
 		.mockRejectedValueOnce(new Error("Convex unavailable"))
 		.mockResolvedValueOnce({ outcome: "duplicate" });
@@ -120,7 +172,10 @@ test("replay keeps one event ID when Convex fails after ingest accepts", async (
 	await deliver(retry);
 	expect(first.retry).toHaveBeenCalledTimes(1);
 	expect(retry.ack).toHaveBeenCalledTimes(1);
-	expect(deliveredIds).toEqual([event.idempotency_key, event.idempotency_key]);
+	expect(requests.map((request) => request.events[0].idempotency_key)).toEqual([
+		event.idempotency_key,
+		event.idempotency_key,
+	]);
 	for (const call of mutation.mock.calls) {
 		expect(call[1]).toMatchObject({
 			requestId: event.idempotency_key,
@@ -137,19 +192,8 @@ for (const outcome of [
 	"too_old",
 ]) {
 	test(`acknowledges the explicit Convex outcome ${outcome}`, async () => {
-		spyOn(globalThis, "fetch").mockResolvedValue(
-			Response.json(
-				{
-					success: true,
-					status: "queued",
-					idempotency_key: event.idempotency_key,
-				},
-				{ status: 202 },
-			),
-		);
-		spyOn(ConvexHttpClient.prototype, "mutation").mockResolvedValue({
-			outcome,
-		});
+		mockIngest(() => undefined);
+		recordInConvex({ outcome });
 		const item = message();
 		await deliver(item);
 		expect(item.ack).toHaveBeenCalledTimes(1);
@@ -158,38 +202,12 @@ for (const outcome of [
 }
 
 test("an unknown Convex result is not mistaken for a recorded click", async () => {
-	spyOn(globalThis, "fetch").mockResolvedValue(
-		Response.json(
-			{
-				success: true,
-				status: "queued",
-				idempotency_key: event.idempotency_key,
-			},
-			{ status: 202 },
-		),
-	);
-	spyOn(ConvexHttpClient.prototype, "mutation").mockResolvedValue({
-		processed: false,
-	});
+	mockIngest(() => undefined);
+	recordInConvex({ processed: false });
 	const item = message();
 	await deliver(item);
 	expect(item.ack).not.toHaveBeenCalled();
 	expect(item.retry).toHaveBeenCalledTimes(1);
-});
-
-test("a successful HTTP status without this event's durable receipt is retried", async () => {
-	spyOn(globalThis, "fetch").mockResolvedValue(
-		Response.json(
-			{ success: true, status: "queued", idempotency_key: "another-event" },
-			{ status: 202 },
-		),
-	);
-	const mutation = spyOn(ConvexHttpClient.prototype, "mutation");
-	const item = message();
-	await deliver(item);
-	expect(item.ack).not.toHaveBeenCalled();
-	expect(item.retry).toHaveBeenCalledTimes(1);
-	expect(mutation).not.toHaveBeenCalled();
 });
 
 test("disabled tracking never sends personal event data downstream", async () => {
@@ -203,25 +221,6 @@ test("disabled tracking never sends personal event data downstream", async () =>
 	expect(item.ack).toHaveBeenCalledTimes(1);
 });
 
-test("ingest cannot silently ignore an event whose tracking is enabled", async () => {
-	spyOn(globalThis, "fetch").mockResolvedValue(
-		Response.json(
-			{
-				success: true,
-				status: "ignored",
-				idempotency_key: event.idempotency_key,
-			},
-			{ status: 202 },
-		),
-	);
-	const mutation = spyOn(ConvexHttpClient.prototype, "mutation");
-	const item = message();
-	await deliver(item);
-	expect(item.ack).not.toHaveBeenCalled();
-	expect(item.retry).toHaveBeenCalledTimes(1);
-	expect(mutation).not.toHaveBeenCalled();
-});
-
 test("malformed queued events retry if durable archival is unavailable", async () => {
 	const send = spyOn(globalThis, "fetch");
 	const item = message({
@@ -233,6 +232,295 @@ test("malformed queued events retry if durable archival is unavailable", async (
 	expect(item.ack).not.toHaveBeenCalled();
 	expect(item.retry).toHaveBeenCalledTimes(1);
 	expect(() => parseQueuedClick({ version: 2, event })).toThrow();
+});
+
+test("one batch request carries every tracked click in queue order", async () => {
+	const requests = mockIngest(() => undefined);
+	const mutation = recordInConvex();
+	const clicks = Array.from({ length: 25 }, (_, index) =>
+		click(`event-${index}`),
+	);
+	const disabled = click("disabled", { tracking_enabled: false });
+	const malformed = message(
+		{ version: 1, event: { ...event, request_id: "different-id" } },
+		"malformed",
+	);
+	await consume([disabled, ...clicks, malformed]);
+	expect(requests).toHaveLength(1);
+	expect(requests[0].path).toBe("/ingest/batch");
+	expect(requests[0].authorization).toBe("Bearer test");
+	expect(requests[0].events).toEqual(
+		clicks.map((item) => (item.body as { event: AnalyticsEvent }).event),
+	);
+	for (const item of [...clicks, disabled]) {
+		expect(item.ack).toHaveBeenCalledTimes(1);
+		expect(item.retry).not.toHaveBeenCalled();
+	}
+	expect(malformed.retry).toHaveBeenCalledTimes(1);
+	expect(convexRequestIds(mutation).sort()).toEqual(
+		clicks.map((_, index) => `event-${index}`).sort(),
+	);
+});
+
+test("more than 100 clicks are split into batches of at most 100", async () => {
+	const requests = mockIngest(() => undefined);
+	recordInConvex();
+	const clicks = Array.from({ length: 205 }, (_, index) =>
+		click(`event-${index}`),
+	);
+	await consume(clicks);
+	expect(requests.map((request) => request.events.length)).toEqual([
+		100, 100, 5,
+	]);
+	expect(requests.flatMap((request) => request.events)).toHaveLength(205);
+	for (const item of clicks) expect(item.ack).toHaveBeenCalledTimes(1);
+});
+
+test("each batch result decides its own click's outcome", async () => {
+	mockIngest((request) =>
+		batchResults(request, (item) => item.idempotency_key),
+	);
+	const mutation = recordInConvex();
+	const [recorded, duplicate, ignored, invalid, conflict] = [
+		"recorded",
+		"duplicate",
+		"ignored",
+		"invalid",
+		"conflict",
+	].map((status) => click(status));
+	await consume([recorded, duplicate, ignored, invalid, conflict]);
+	for (const item of [recorded, duplicate]) {
+		expect(item.ack).toHaveBeenCalledTimes(1);
+		expect(item.retry).not.toHaveBeenCalled();
+	}
+	// Only tracked clicks are sent, so "ignored" is retried like a rejection.
+	for (const item of [ignored, invalid, conflict]) {
+		expect(item.ack).not.toHaveBeenCalled();
+		expect(item.retry).toHaveBeenCalledWith({ delaySeconds: 10 });
+	}
+	expect(convexRequestIds(mutation).sort()).toEqual(["duplicate", "recorded"]);
+});
+
+test("an invalid result may omit the key it could not read", async () => {
+	mockIngest(({ events }) =>
+		Response.json({
+			success: true,
+			results: events.map((item, index) =>
+				index === 0
+					? { index, idempotency_key: null, status: "invalid" }
+					: {
+							index,
+							idempotency_key: item.idempotency_key,
+							status: "recorded",
+						},
+			),
+		}),
+	);
+	recordInConvex();
+	const [unreadable, recorded] = [click("unreadable"), click("recorded")];
+	await consume([unreadable, recorded]);
+	expect(unreadable.retry).toHaveBeenCalledTimes(1);
+	expect(recorded.ack).toHaveBeenCalledTimes(1);
+});
+
+test("bot clicks are committed by ingest but never update live counts", async () => {
+	mockIngest(() => undefined);
+	const mutation = recordInConvex();
+	const [bot, human] = [click("bot", { is_bot: true }), click("human")];
+	await consume([bot, human]);
+	expect(bot.ack).toHaveBeenCalledTimes(1);
+	expect(human.ack).toHaveBeenCalledTimes(1);
+	expect(convexRequestIds(mutation)).toEqual(["human"]);
+});
+
+test("Convex writes run at most 10 at a time", async () => {
+	mockIngest(() => undefined);
+	let active = 0;
+	let peak = 0;
+	spyOn(ConvexHttpClient.prototype, "mutation").mockImplementation(async () => {
+		active++;
+		peak = Math.max(peak, active);
+		await new Promise((resolve) => setTimeout(resolve, 5));
+		active--;
+		return { outcome: "recorded" };
+	});
+	const clicks = Array.from({ length: 35 }, (_, index) =>
+		click(`event-${index}`),
+	);
+	await consume(clicks);
+	expect(peak).toBe(10);
+	for (const item of clicks) expect(item.ack).toHaveBeenCalledTimes(1);
+});
+
+test("a Convex failure retries only that click", async () => {
+	mockIngest(() => undefined);
+	spyOn(ConvexHttpClient.prototype, "mutation").mockImplementation(
+		async (_mutation, args) => {
+			if ((args as { requestId: string }).requestId === "failing")
+				throw new Error("Convex unavailable");
+			return { outcome: "recorded" };
+		},
+	);
+	const [before, failing, after] = ["before", "failing", "after"].map((id) =>
+		click(id),
+	);
+	await consume([before, failing, after]);
+	expect(failing.ack).not.toHaveBeenCalled();
+	expect(failing.retry).toHaveBeenCalledTimes(1);
+	for (const item of [before, after]) {
+		expect(item.ack).toHaveBeenCalledTimes(1);
+		expect(item.retry).not.toHaveBeenCalled();
+	}
+});
+
+for (const status of [202, 400, 409, 413, 500, 503]) {
+	test(`a batch answered with HTTP ${status} retries every click`, async () => {
+		mockIngest(() => Response.json({ success: true }, { status }));
+		const mutation = recordInConvex();
+		const clicks = ["first", "second", "third"].map((id) => click(id));
+		await consume(clicks);
+		for (const item of clicks) {
+			expect(item.ack).not.toHaveBeenCalled();
+			expect(item.retry).toHaveBeenCalledWith({ delaySeconds: 10 });
+		}
+		expect(mutation).not.toHaveBeenCalled();
+	});
+}
+
+for (const [name, reply] of [
+	["success is not true", () => ({ success: false, results: [] })],
+	["results are missing", () => ({ success: true })],
+	[
+		"a result is missing",
+		(events: AnalyticsEvent[]) => ({
+			success: true,
+			results: events.slice(1).map((item, index) => ({
+				index,
+				idempotency_key: item.idempotency_key,
+				status: "recorded",
+			})),
+		}),
+	],
+	[
+		"indexes are out of order",
+		(events: AnalyticsEvent[]) => ({
+			success: true,
+			results: events.map((item, index) => ({
+				index: events.length - 1 - index,
+				idempotency_key: item.idempotency_key,
+				status: "recorded",
+			})),
+		}),
+	],
+	[
+		"a key does not match its event",
+		(events: AnalyticsEvent[]) => ({
+			success: true,
+			results: events.map((_, index) => ({
+				index,
+				idempotency_key: "another-event",
+				status: "recorded",
+			})),
+		}),
+	],
+	[
+		"a committed result has no key",
+		(events: AnalyticsEvent[]) => ({
+			success: true,
+			results: events.map((_, index) => ({
+				index,
+				idempotency_key: null,
+				status: "recorded",
+			})),
+		}),
+	],
+	[
+		"a status is unknown",
+		(events: AnalyticsEvent[]) => ({
+			success: true,
+			results: events.map((item, index) => ({
+				index,
+				idempotency_key: item.idempotency_key,
+				status: "queued",
+			})),
+		}),
+	],
+] as const) {
+	test(`a 200 batch response where ${name} retries every click`, async () => {
+		mockIngest(({ events }) => Response.json(reply(events)));
+		const mutation = recordInConvex();
+		const clicks = ["first", "second"].map((id) => click(id));
+		await consume(clicks);
+		for (const item of clicks) {
+			expect(item.ack).not.toHaveBeenCalled();
+			expect(item.retry).toHaveBeenCalledTimes(1);
+		}
+		expect(mutation).not.toHaveBeenCalled();
+	});
+}
+
+test("a 200 batch response that is not JSON retries every click", async () => {
+	mockIngest(() => new Response("committed", { status: 200 }));
+	const clicks = ["first", "second"].map((id) => click(id));
+	await consume(clicks);
+	for (const item of clicks) expect(item.retry).toHaveBeenCalledTimes(1);
+});
+
+test("an ingest without the batch route falls back to per-click delivery", async () => {
+	const requests = mockIngest(({ path, events }) =>
+		path.endsWith("/batch")
+			? new Response("Not found", { status: 404 })
+			: Response.json(
+					{
+						success: true,
+						status: "queued",
+						idempotency_key: events[0].idempotency_key,
+						committed: true,
+						outcome: "recorded",
+					},
+					{ status: 202 },
+				),
+	);
+	const mutation = recordInConvex();
+	const clicks = ["first", "second", "third"].map((id) => click(id));
+	await consume(clicks);
+	expect(requests.map((request) => request.path)).toEqual([
+		"/ingest/batch",
+		"/ingest",
+		"/ingest",
+		"/ingest",
+	]);
+	expect(
+		requests.slice(1).map((request) => request.events[0].idempotency_key),
+	).toEqual(["first", "second", "third"]);
+	for (const item of clicks) expect(item.ack).toHaveBeenCalledTimes(1);
+	expect(mutation).toHaveBeenCalledTimes(3);
+});
+
+test("per-click delivery still refuses an ignored response for a tracked click", async () => {
+	mockIngest(({ events }) =>
+		Response.json(
+			{
+				success: true,
+				status: "ignored",
+				idempotency_key: events[0].idempotency_key,
+			},
+			{ status: 202 },
+		),
+	);
+	const mutation = recordInConvex();
+	await expect(deliverClick(event, env)).rejects.toThrow(
+		"did not confirm this event was accepted",
+	);
+	expect(mutation).not.toHaveBeenCalled();
+});
+
+test("incomplete delivery settings retry every tracked click without sending", async () => {
+	const send = spyOn(globalThis, "fetch");
+	const clicks = ["first", "second"].map((id) => click(id));
+	await consume(clicks, { ...env, API_SECRET: undefined } as Bindings);
+	expect(send).not.toHaveBeenCalled();
+	for (const item of clicks) expect(item.retry).toHaveBeenCalledTimes(1);
 });
 
 test("logs retain the request ID, reason, and readable error", () => {
@@ -334,6 +622,17 @@ for (const { secrets, write, ops } of scopedSecrets) {
 		expect(calls).toEqual([
 			{ path: "/ingest", authorization: `Bearer ${write}` },
 		]);
+	});
+
+	test(`batch delivery authorizes ingest with ${write} given ${names}`, async () => {
+		const requests = mockIngest(() => undefined);
+		recordInConvex();
+		const item = message();
+		await consume([item], secretEnv);
+		expect(item.ack).toHaveBeenCalledTimes(1);
+		expect(
+			requests.map(({ path, authorization }) => ({ path, authorization })),
+		).toEqual([{ path: "/ingest/batch", authorization: `Bearer ${write}` }]);
 	});
 
 	test(`resolve checks the receipt with ${ops} and delivers with ${write} given ${names}`, async () => {

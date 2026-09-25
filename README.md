@@ -18,19 +18,36 @@ queueing, and are reused on retries. Session markers use atomic `SET NX EX` with
 a 30-minute lifetime. The flag is a first-observation hint, not an exact count of
 people; ingestion should deduplicate session IDs when calculating visitors.
 
-The consumer sends the event to ingest, requires its 202 acknowledgement with
-`success: true`, the same `idempotency_key`, and `status: queued` for tracked events, then
-updates the Convex live view with that same event ID. Bot events remain in durable
-analytics but do not update human live counts. Ingest must deduplicate IDs across
-replay and acknowledge only durable queue acceptance. Convex must deduplicate
-click writes and return one of `recorded`, `duplicate`, `link_deleted`,
-`tracking_disabled`, or `too_old`. Unknown results are retried. A deleted link
-cannot cause endless retries. Old history is retained by ingest even if Convex
-rejects it outside its supported live replay window.
+The consumer sends every tracked event in a queue batch to ingest in one
+`POST <INGEST_ENDPOINT>/batch` request (`{ "events": [...] }`, at most 100 per
+request), authorized with `INGEST_WRITE_SECRET`. Invalid envelopes are archived
+and events with tracking disabled are acknowledged without being sent. Ingest
+must answer HTTP 200 with `success: true` and one result per event, in order, with
+the matching `index` and `idempotency_key` and a status of `recorded`,
+`duplicate`, `ignored`, `invalid` or `conflict`. A 200 means every `recorded` or
+`duplicate` event is committed. Any other status, a malformed 200 or a network
+failure retries every message in that request. A 404 means ingest does not have
+the batch route yet: each event then goes to `POST /ingest` as before, which
+requires a 202 with `success: true`, the same `idempotency_key` and
+`status: queued` (extra fields such as `committed` are ignored).
 
-Each message is acknowledged only after its required deliveries finish. Failed
-messages retry with increasing delay (up to one hour), then move to the configured
-failed-events queue after 12 retries. Its separate consumer archives messages in
+Per event, `recorded` and `duplicate` update the Convex live view with the same
+event ID, at most 10 Convex writes at a time to limit contention on busy links.
+Bot events stay in durable analytics but do not update human live counts.
+Only tracked clicks are sent, so `ignored`, `invalid` and `conflict` are all
+retried and so reach the failed-click queue like a rejected single-event request.
+A Convex failure retries only that message. Ingest must deduplicate IDs across
+replay. Convex must deduplicate click writes and return one of `recorded`,
+`duplicate`, `link_deleted`, `tracking_disabled`, or `too_old`. Unknown results
+are retried. A deleted link cannot cause endless retries. Old history is retained
+by ingest even if Convex rejects it outside its supported live replay window.
+
+The main consumer receives up to 100 messages per batch, waits at most 5 seconds
+to fill one, and runs at most 2 batches at once. Each message is acknowledged only
+after its required deliveries finish. Failed messages retry after 10 seconds,
+doubling to a one-hour cap, and move to the failed-events queue after 30 retries:
+about 22.4 hours (80,710 seconds) of continuous ingest failure, up from about 4.4
+hours with the previous 12 retries. Its separate consumer archives messages in
 R2 before acknowledging them. There is no lossy direct-HTTP fallback. The
 previous optional `ANALYTICS_ENDPOINT`/Tinybird fanout is removed; ingest is the
 durable analytics authority. A new external sink must consume that retained
@@ -186,6 +203,10 @@ message is unresolved, even after the failed queue empties; an unreadable archiv
 raises its own alert. Checks also cover ingest readiness and detailed component
 health, any failed ingest job, more than 1,000 waiting ingest jobs, monitoring
 readiness, and a missing/invalid backup or a latest backup older than 26 hours.
+The database, writer, archive and backup components are required. Older ingest
+versions report `queue` and `recovery`; newer ones drop those and report the
+event `journal`. Each of these is checked only when present, so either version
+passes without false alerts.
 The backup check reads only the latest manifest and the referenced object's
 metadata; checksum verification remains the database owner's backup duty.
 
@@ -194,7 +215,7 @@ deadline. HTTP requests have their own ten-second timeout and cannot follow
 redirects. Ingest alerts distinguish a failed connection, unexpected HTTP
 status, invalid response, timeout, or a service-reported failure. Known component
 and recovery reason codes identify database, queue, writer, backup, archive,
-and recovery problems. Logs include only fixed status, component and reason
+journal and recovery problems. Logs include only fixed status, component and reason
 fields; raw exception text, event bodies, owner data and credentials are omitted.
 
 An ingest health failure is checked once more after 15 seconds before sending
@@ -240,7 +261,8 @@ pnpm exec wrangler deploy --env dev --dry-run
 The checks never deploy. Tests cover queue-acceptance ordering, 503 on enqueue
 failure, ignored tracking, atomic session markers, downstream failures, repeated
 IDs, terminal Convex outcomes, malformed events, redirect safety, domain binding,
-keyed visitor hashes, and scoped ingest secrets. CI also runs the actual workerd
+keyed visitor hashes, scoped ingest secrets, batch delivery and its per-event
+fallback, bounded Convex writes, and both ingest health shapes. CI also runs the actual workerd
 runtime with isolated R2 and intercepted HTTP: archive/write
 failures, crash recovery, verified acknowledgement, exact v1 replay, downstream
 deduplication, receipt mismatches, retained resolution evidence, late redelivery,

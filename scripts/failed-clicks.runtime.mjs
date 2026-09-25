@@ -193,6 +193,27 @@ const runtime = new Miniflare({
 					: event.occurred_at,
 				link_id: scenario.wrongLink ? "another-link" : event.link_id,
 			});
+		if (url.pathname === "/ingest/batch") {
+			assert.equal(
+				request.headers.get("Authorization"),
+				"Bearer FAKE-ingest-secret",
+			);
+			// An ingest version from before the batch route.
+			if (scenario.noBatchRoute)
+				return new Response("Not found", { status: 404 });
+			const { events } = await request.json();
+			return Response.json({
+				success: true,
+				results: events.map((body, index) => {
+					assert.deepEqual(body, event);
+					const status = ingestIds.has(body.idempotency_key)
+						? "duplicate"
+						: "recorded";
+					ingestIds.add(body.idempotency_key);
+					return { index, idempotency_key: body.idempotency_key, status };
+				}),
+			});
+		}
 		if (url.pathname === "/ingest") {
 			assert.equal(
 				request.headers.get("Authorization"),
@@ -211,12 +232,17 @@ const runtime = new Miniflare({
 					},
 					{ status: 202 },
 				);
+			const outcome = ingestIds.has(body.idempotency_key)
+				? "duplicate"
+				: "recorded";
 			ingestIds.add(body.idempotency_key);
 			return Response.json(
 				{
 					success: true,
 					status: "queued",
 					idempotency_key: body.idempotency_key,
+					committed: true,
+					outcome,
 				},
 				{ status: 202 },
 			);
@@ -547,14 +573,42 @@ try {
 			{ id: "replayed-" + attempt, queue: mainQueue, body: republished.at(-1) },
 			(result) => {
 				assert.equal(result.acked, 1);
+				assert.deepEqual(
+					outbound
+						.map((call) => new URL(call.url))
+						.filter((url) => url.hostname === "ingest.example.test")
+						.map((url) => url.pathname),
+					["/ingest/batch"],
+				);
 				assert.equal(ingestIds.size, 1);
 				assert.equal(convexIds.size, 1);
 			},
 		);
 	}
 	await run(
-		"tracked event ignored by ingest is retried without a Convex write",
-		{ id: "false-ignored", queue: mainQueue, falseIgnored: true },
+		"main-queue delivery falls back to per-click ingest without the batch route",
+		{ id: "no-batch-route", queue: mainQueue, noBatchRoute: true },
+		(result) => {
+			assert.equal(result.acked, 1);
+			assert.deepEqual(
+				outbound
+					.map((call) => new URL(call.url))
+					.filter((url) => url.hostname === "ingest.example.test")
+					.map((url) => url.pathname),
+				["/ingest/batch", "/ingest"],
+			);
+			assert.equal(ingestIds.size, 1);
+			assert.equal(convexIds.size, 1);
+		},
+	);
+	await run(
+		"tracked event ignored by per-click ingest is retried without a Convex write",
+		{
+			id: "false-ignored",
+			queue: mainQueue,
+			falseIgnored: true,
+			noBatchRoute: true,
+		},
 		(result) => {
 			assert.equal(result.acked, 0);
 			assert.equal(result.retried, 1);

@@ -33,6 +33,8 @@ const issueMessages = {
 	ingest_writer_health:
 		"The analytics event writer reports a failed or delayed commit.",
 	ingest_archiver_health: "The analytics archive check failed.",
+	ingest_journal_health:
+		"The analytics event journal or its startup replay failed.",
 	ingest_backup_health:
 		"The analytics service reports a database backup failure.",
 	ingest_recovery_health: "The analytics recovery check failed.",
@@ -137,7 +139,15 @@ const componentIssues = {
 	archiver: "ingest_archiver_health",
 	backup: "ingest_backup_health",
 	recovery: "ingest_recovery_health",
+	journal: "ingest_journal_health",
 } as const satisfies Record<string, Issue>;
+// Older ingest versions report queue and recovery; newer ones report journal.
+// Each is checked only when present. Every other component is required.
+const optionalComponents = new Set<keyof typeof componentIssues>([
+	"queue",
+	"recovery",
+	"journal",
+]);
 const recoveryIssues = {
 	overdue: "ingest_recovery_overdue",
 	stalled: "ingest_recovery_stalled",
@@ -186,6 +196,8 @@ function inspectIngestHealth(value: unknown): Omit<IngestCheck, "evidence"> & {
 	for (const component of Object.keys(componentIssues) as Array<
 		keyof typeof componentIssues
 	>) {
+		if (checks[component] === undefined && optionalComponents.has(component))
+			continue;
 		try {
 			const check = record(checks[component]);
 			const componentStatus = healthStatus(check.status);

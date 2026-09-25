@@ -15,9 +15,10 @@ setup, checks, and deployment commands.
   keys during cleanup because changing them can move visitors between variants.
 - `src/helper.ts` builds the 302 response and click data. Redirect responses use
   `Cache-Control: no-store`; there is no redirect cache.
-- Background work uses `c.executionCtx.waitUntil(...)` to send configured analytics
-  requests and record eligible human clicks in Convex. `src/convex-api.ts` holds
-  the reference to the single Convex mutation used by this service.
+- Tracked redirects queue a click event. `src/click-delivery.ts` sends each queue
+  batch to ingest's batch route (falling back to per-event `/ingest` on a 404),
+  then records eligible human clicks in Convex. `src/convex-api.ts` holds the
+  reference to the single Convex mutation used by this service.
 
 ## Configuration and validation
 

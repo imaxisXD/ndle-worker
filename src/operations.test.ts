@@ -483,6 +483,7 @@ test("each known failed component has a distinct issue code and unknown response
 		archiver: "ingest_archiver_health",
 		backup: "ingest_backup_health",
 		recovery: "ingest_recovery_health",
+		journal: "ingest_journal_health",
 	};
 	for (const [component, issue] of Object.entries(expected)) {
 		const value = {
@@ -511,6 +512,108 @@ test("each known failed component has a distinct issue code and unknown response
 		checkIngestHealth({ status: "surprise", checks: healthy.checks }),
 	).toEqual(["ingest_health_invalid"]);
 });
+
+// Current ingest: no Redis queue or per-event recovery loop, plus a journal.
+const journalHealthy = {
+	status: "ok",
+	checks: {
+		duckdb: { status: "ok" },
+		batch_writer: { status: "ok" },
+		archiver: { status: "ok" },
+		backup: { status: "ok" },
+		journal: { status: "ok", details: { replayed: 0 } },
+	},
+};
+
+test("old and new ingest health shapes are both healthy without false alerts", () => {
+	expect(checkIngestHealth(healthy)).toEqual([]);
+	expect(checkIngestHealth(journalHealthy)).toEqual([]);
+	expect(
+		checkIngestHealth({
+			status: "ok",
+			checks: { ...healthy.checks, journal: journalHealthy.checks.journal },
+		}),
+	).toEqual([]);
+});
+
+test("a failed journal has its own issue and present optional components are still validated", () => {
+	expect(
+		checkIngestHealth({
+			status: "error",
+			checks: {
+				...journalHealthy.checks,
+				journal: { status: "error", details: "PRIVATE-replay-error" },
+			},
+		}),
+	).toEqual(["ingest_journal_health"]);
+	for (const broken of [
+		{ journal: "broken" },
+		{ journal: { status: "surprise" } },
+		{ queue: null },
+		{ queue: { status: "ok" } },
+		{ recovery: { status: "degraded" } },
+	]) {
+		expect(
+			checkIngestHealth({
+				status: "ok",
+				checks: { ...journalHealthy.checks, ...broken },
+			}),
+		).toContain("ingest_health_invalid");
+	}
+});
+
+test("a missing required component is invalid in either health shape", () => {
+	for (const shape of [healthy, journalHealthy]) {
+		for (const component of ["duckdb", "batch_writer", "archiver", "backup"]) {
+			const checks: Record<string, unknown> = { ...shape.checks };
+			delete checks[component];
+			expect(checkIngestHealth({ status: "ok", checks })).toEqual([
+				"ingest_health_invalid",
+			]);
+		}
+	}
+});
+
+for (const [name, detailed, expectedEmail] of [
+	["new-shape healthy ingest sends no email", journalHealthy, null],
+	[
+		"a persistent journal failure sends its specific alert",
+		{
+			status: "error",
+			checks: { ...journalHealthy.checks, journal: { status: "error" } },
+		},
+		"event journal or its startup replay failed",
+	],
+] as const) {
+	test(name, async () => {
+		const emails: string[] = [];
+		spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
+			if (String(input).includes("resend.com")) {
+				emails.push(JSON.parse(String(init?.body)).text);
+				return Response.json({ id: "accepted" });
+			}
+			return Response.json(
+				String(input).includes("/health/detailed")
+					? detailed
+					: { status: "ready" },
+				{
+					status:
+						String(input).includes("/health/detailed") &&
+						detailed.status !== "ok"
+							? 503
+							: 200,
+				},
+			);
+		});
+		await checkOperations(environment(), now, fetch, 12_000, skipWait);
+		if (expectedEmail === null) expect(emails).toEqual([]);
+		else {
+			expect(emails).toHaveLength(1);
+			expect(emails[0]).toContain(expectedEmail);
+			expect(emails[0]).not.toContain("recovery");
+		}
+	});
+}
 
 test("HTTP, network, malformed and stalled health checks remain distinct and never erase failed jobs", async () => {
 	const failedJobs = structuredClone(healthy);
