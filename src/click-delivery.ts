@@ -3,6 +3,7 @@ import { sendAnalyticsEvent } from "./analytics";
 import { parseQueuedClick } from "./click-envelope";
 import { recordClick } from "./convex-api";
 import { archiveFailedClick } from "./failed-clicks";
+import { ingestWriteSecret } from "./ingest-auth";
 import { createLogger } from "./log";
 import type { AnalyticsEvent, Bindings } from "./types";
 
@@ -25,9 +26,10 @@ export async function deliverClick(
 	env: Bindings,
 ): Promise<string> {
 	if (!event.tracking_enabled) return "tracking_disabled";
+	const ingestToken = ingestWriteSecret(env);
 	if (
 		!env.INGEST_ENDPOINT ||
-		!env.API_SECRET ||
+		!ingestToken ||
 		!env.CONVEX_URL ||
 		!env.SHARED_SECRET
 	) {
@@ -35,7 +37,7 @@ export async function deliverClick(
 	}
 	const ingestOutcome = await sendAnalyticsEvent({
 		endpoint: env.INGEST_ENDPOINT,
-		token: env.API_SECRET,
+		token: ingestToken,
 		event,
 	});
 	if (ingestOutcome === "ignored") return "tracking_disabled";

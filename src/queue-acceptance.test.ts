@@ -121,3 +121,62 @@ test("simultaneous clicks claim one first-session marker and have distinct event
 	for (const { event } of events)
 		expect(event.request_id).toBe(event.idempotency_key);
 });
+
+const encode = (value: string) => new TextEncoder().encode(value);
+const hex = (buffer: ArrayBuffer) =>
+	[...new Uint8Array(buffer)]
+		.map((byte) => byte.toString(16).padStart(2, "0"))
+		.join("");
+const sha256 = async (value: string) =>
+	hex(await crypto.subtle.digest("SHA-256", encode(value)));
+
+async function visitorEvent(env: Record<string, unknown>) {
+	setup();
+	const events: QueuedClick[] = [];
+	const send = mock(async (body: QueuedClick) => {
+		events.push(body);
+	});
+	await app.request(
+		"https://ndle.test/test",
+		{ headers: { "user-agent": "browser", "cf-connecting-ip": "203.0.113.1" } },
+		{ CLICK_EVENTS: { send }, ...env },
+	);
+	mock.restore();
+	expect(events).toHaveLength(1);
+	return events[0].event;
+}
+
+test("without IP_HASH_SECRET the visitor hash and session stay unchanged", async () => {
+	for (const env of [{}, { IP_HASH_SECRET: "" }]) {
+		const event = await visitorEvent(env);
+		expect(event.ip_hash).toBe(await sha256("203.0.113.1"));
+		expect(event.session_id).toBe(
+			(await sha256(`${event.ip_hash}-browser`)).substring(0, 16),
+		);
+	}
+});
+
+test("IP_HASH_SECRET keys the visitor hash and the session derived from it", async () => {
+	for (const secret of [
+		"first-test-key",
+		"second-test-key",
+		"first-test-key",
+	]) {
+		const key = await crypto.subtle.importKey(
+			"raw",
+			encode(secret),
+			{ name: "HMAC", hash: "SHA-256" },
+			false,
+			["sign"],
+		);
+		const expected = hex(
+			await crypto.subtle.sign("HMAC", key, encode("203.0.113.1")),
+		);
+		const event = await visitorEvent({ IP_HASH_SECRET: secret });
+		expect(event.ip_hash).toBe(expected);
+		expect(event.ip_hash).not.toBe(await sha256("203.0.113.1"));
+		expect(event.session_id).toBe(
+			(await sha256(`${expected}-browser`)).substring(0, 16),
+		);
+	}
+});

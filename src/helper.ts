@@ -83,19 +83,48 @@ function assertSafeDestinationUrl(input: string | URL): URL {
 	return url;
 }
 
+function toHex(buffer: ArrayBuffer): string {
+	const bytes = new Uint8Array(buffer);
+	let out = "";
+	for (let i = 0; i < bytes.length; i++) {
+		out += bytes[i].toString(16).padStart(2, "0");
+	}
+	return out;
+}
+
 /**
  * Compute a SHA-256 hash in hex for a given string.
  */
 async function sha256Hex(value: string): Promise<string> {
 	const encoder = new TextEncoder();
 	const data = encoder.encode(value);
-	const hash = await crypto.subtle.digest("SHA-256", data);
-	const bytes = new Uint8Array(hash);
-	let out = "";
-	for (let i = 0; i < bytes.length; i++) {
-		out += bytes[i].toString(16).padStart(2, "0");
+	return toHex(await crypto.subtle.digest("SHA-256", data));
+}
+
+// Imported once per isolate; keyed by the secret so a changed value re-imports.
+let ipHashKey: { secret: string; key: CryptoKey } | undefined;
+
+/**
+ * Hash a visitor IP for storage. With a secret this is hex HMAC-SHA256, which
+ * cannot be reversed by enumerating IPv4 addresses without that secret. Without
+ * one it stays the legacy plain SHA-256, so deploying first changes nothing.
+ */
+async function hashVisitorIp(ip: string, secret?: string): Promise<string> {
+	if (!secret) return sha256Hex(ip);
+	let key = ipHashKey?.secret === secret ? ipHashKey.key : undefined;
+	if (!key) {
+		key = await crypto.subtle.importKey(
+			"raw",
+			new TextEncoder().encode(secret),
+			{ name: "HMAC", hash: "SHA-256" },
+			false,
+			["sign"],
+		);
+		ipHashKey = { secret, key };
 	}
-	return out;
+	return toHex(
+		await crypto.subtle.sign("HMAC", key, new TextEncoder().encode(ip)),
+	);
 }
 
 /**
@@ -381,7 +410,7 @@ async function buildAnalyticsInput(
 	const os = getOS(userAgent, req.header("sec-ch-ua-platform"));
 	const ip =
 		req.header("cf-connecting-ip") ?? req.header("x-forwarded-for") ?? "";
-	const ipHash = await sha256Hex(ip);
+	const ipHash = await hashVisitorIp(ip, c.env.IP_HASH_SECRET);
 	const languageHeader = req.header("accept-language") ?? null;
 	const language = languageHeader
 		? languageHeader.split(",")[0]?.trim() || null
@@ -504,6 +533,7 @@ export {
 	getBrowser,
 	getDeviceType,
 	getOS,
+	hashVisitorIp,
 	isBot,
 	sha256Hex,
 };

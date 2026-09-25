@@ -1,8 +1,9 @@
 # NDLE redirect worker
 
-The Worker reads the current Redis link record, checks whether it is active and
-unexpired, applies A/B and UTM rules, and returns a 302 with browser caching
-disabled. Tracked redirects wait until Cloudflare Queues accepts their event.
+The Worker reads the current Redis link record, checks that it may open on the
+requested host and is active and unexpired, applies A/B and UTM rules, and
+returns a 302 with browser caching disabled. Tracked redirects wait until
+Cloudflare Queues accepts their event.
 If Redis, event preparation, or queue acceptance fails, the visitor receives a
 retryable 503 instead of a redirect whose click could silently disappear.
 Links with tracking disabled skip event collection and the queue.
@@ -39,6 +40,36 @@ The destination decision and existing deterministic A/B assignment are preserved
 The legacy assignment uses an IP-derived key. Changing that to include user agent
 or a cookie would move existing visitors between variants, so introduce an
 explicit assignment version for new experiments before making that change.
+
+## Domains and secrets
+
+`SHORT_LINK_HOSTS` lists the comma-separated hosts that serve every link:
+`ndle.fyi,www.ndle.fyi` in production and `dev.ndle.fyi,www.dev.ndle.fyi` in
+development (`wrangler.jsonc`). Missing or empty means `ndle.fyi,www.ndle.fyi`.
+Hosts are compared lowercase without a trailing dot. Any other host is a
+customer custom domain and opens only links whose Redis record has the same
+`domain`. A link with `domain: null` (default short domain) or another domain
+gets the same 404 as a missing link and records no click. Custom-domain links
+still open on the default hosts, so hosted QR codes and existing `ndle.fyi`
+shares keep working. Records projected before Convex wrote `domain` lack the
+field; they still open on any host until re-projected, and each such request on a
+custom domain logs `legacy_domain_projection` at info level. The rollout is
+complete when that log stops appearing.
+
+Ingest secrets are scoped. `INGEST_WRITE_SECRET` authorizes `POST /ingest` (click
+delivery and the repeated delivery in resolve). `OPS_SECRET` authorizes
+`/health/detailed`, `/health/metrics`, `/internal/events/receipt` and other
+`/internal/*` operator routes. Each falls back to the legacy shared `API_SECRET`
+when unset or empty, so deploying without them changes nothing. Once both are
+set, this Worker no longer uses `API_SECRET`.
+
+`IP_HASH_SECRET` is optional. When set, the stored `ip_hash` is hex HMAC-SHA256
+of the visitor IP, and `session_id` is derived from it; unset or empty keeps the
+legacy plain SHA-256. A/B assignment is unchanged. Set a long random value with
+`pnpm exec wrangler secret put IP_HASH_SECRET` (add `--env dev` for development).
+Setting or rotating it changes every visitor's `ip_hash` and `session_id` once:
+visitors active at the switch may have their first click of a session counted
+once more, and hashes from before the switch do not match later ones.
 
 ## Provisioning and release order
 
@@ -95,7 +126,8 @@ CLI; an OAuth login without R2 object access is insufficient. Set
 `CLICK_EVENTS_QUEUE_NAME`, and `CLICK_EVENTS_FAILED_QUEUE_NAME` for one environment.
 Replay additionally requires `CLICK_EVENTS_QUEUE_ID`; the tool verifies its name.
 Resolve records `RECOVERY_OPERATOR`; tracked events also require `INGEST_ENDPOINT`,
-`API_SECRET`, `CONVEX_URL`, and `SHARED_SECRET`.
+`OPS_SECRET` (receipt check) and `INGEST_WRITE_SECRET` (delivery), either of which
+may fall back to `API_SECRET`, plus `CONVEX_URL` and `SHARED_SECRET`.
 
 ```sh
 # Substitute the exact source queue and original Cloudflare message ID from logs
@@ -144,6 +176,7 @@ The production scheduled handler checks NDLE every five minutes, separately
 from redirects and click delivery. Development has no schedule and alerts are
 disabled. Set `RESEND_API_KEY`, `OPS_ALERT_FROM` and `OPS_ALERT_TO` with Wrangler
 secrets; use a sending-only key restricted to the verified NDLE sender domain.
+The detailed ingest health check sends `OPS_SECRET` (else `API_SECRET`).
 `OPS_ALERTS_ENABLED=false` disables checks without changing redirects.
 
 Email is sent when the main queue's oldest reported event is over five minutes
@@ -206,8 +239,9 @@ pnpm exec wrangler deploy --env dev --dry-run
 
 The checks never deploy. Tests cover queue-acceptance ordering, 503 on enqueue
 failure, ignored tracking, atomic session markers, downstream failures, repeated
-IDs, terminal Convex outcomes, malformed events, and redirect safety. CI also runs
-the actual workerd runtime with isolated R2 and intercepted HTTP: archive/write
+IDs, terminal Convex outcomes, malformed events, redirect safety, domain binding,
+keyed visitor hashes, and scoped ingest secrets. CI also runs the actual workerd
+runtime with isolated R2 and intercepted HTTP: archive/write
 failures, crash recovery, verified acknowledgement, exact v1 replay, downstream
 deduplication, receipt mismatches, retained resolution evidence, late redelivery,
 and archived-failure alerts. The runtime is stopped in `finally`; tests never

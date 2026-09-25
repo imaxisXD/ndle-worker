@@ -8,6 +8,7 @@ import {
 	buildNoContentResponse,
 	getBooleanEnv,
 } from "./helper";
+import { checkLinkDomain } from "./link-domain";
 import { createRequestLogger } from "./log";
 import { checkOperations } from "./operations";
 import { consumeQueue } from "./queue-handler";
@@ -39,6 +40,23 @@ app.get("/:websiteSlug{[A-Za-z0-9_-]+}", async (c) => {
 			slug,
 		);
 		if (!redisValue) return c.notFound();
+		const domainDecision = checkLinkDomain({
+			host: new URL(c.req.url).hostname,
+			domain: redisValue.domain,
+			shortLinkHosts: c.env.SHORT_LINK_HOSTS,
+		});
+		if (domainDecision === "denied") {
+			// Indistinguishable from a missing link, and never tracked.
+			log.info("Link cannot be opened", {
+				reason: "link is not served on this domain",
+			});
+			return c.notFound();
+		}
+		if (domainDecision === "legacy") {
+			log.info("Link record has no domain binding yet", {
+				reason: "legacy_domain_projection",
+			});
+		}
 		const decision = await decideRedirect({
 			redisValue,
 			readHeader: (name) => c.req.header(name),

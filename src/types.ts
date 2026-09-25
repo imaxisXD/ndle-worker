@@ -78,7 +78,14 @@ export type AnalyticsEventInput = Omit<
 type AppRuntimeBindings = {
 	UPSTASH_REDIS_REST_TOKEN: string;
 	UPSTASH_REDIS_REST_URL: string;
-	API_SECRET: string;
+	// Legacy shared ingest secret, used only where a scoped secret is unset.
+	API_SECRET?: string;
+	// Ingest `POST /ingest`.
+	INGEST_WRITE_SECRET?: string;
+	// Ingest `/health/detailed`, `/health/metrics` and `/internal/*` routes.
+	OPS_SECRET?: string;
+	// HMAC key for stored visitor IP hashes. Unset keeps plain SHA-256.
+	IP_HASH_SECRET?: string;
 	TRACKING_ENABLED?: string;
 	LOG_LEVEL?: string;
 	SHARED_SECRET: string;
@@ -140,6 +147,9 @@ export type RedisValueObject = {
 	created_at: number;
 	updated_at: number;
 	link_id: string;
+	// Normalized custom hostname; null means the default short domain.
+	// Absent on records projected before domain binding existed.
+	domain?: string | null;
 	is_active: boolean;
 	expires_at: number | null;
 	max_clicks: number | null;

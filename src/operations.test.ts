@@ -74,6 +74,40 @@ test("healthy checks read only metrics and the verified backup and send no email
 	expect(calls[2].headers.get("Authorization")).toBe("Bearer ingest-test-key");
 });
 
+for (const [secrets, expected] of [
+	[{ OPS_SECRET: "ops-test-key" }, "Bearer ops-test-key"],
+	[
+		{ OPS_SECRET: "", INGEST_WRITE_SECRET: "write-test-key" },
+		"Bearer ingest-test-key",
+	],
+	[
+		{ API_SECRET: undefined, OPS_SECRET: "ops-test-key" },
+		"Bearer ops-test-key",
+	],
+	[{ API_SECRET: undefined }, null],
+] as const) {
+	test(`detailed health sends ${expected ?? "no credentials"} given ${JSON.stringify(secrets)}`, async () => {
+		const env = { ...environment(), ...secrets } as Bindings;
+		const headers = new Map<string, string | null>();
+		spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
+			if (String(input).includes("resend.com"))
+				return Response.json({ id: "accepted" });
+			headers.set(
+				new URL(String(input)).pathname,
+				new Headers(init?.headers).get("Authorization"),
+			);
+			return Response.json(
+				String(input).includes("/health/detailed")
+					? healthy
+					: { status: "ready" },
+			);
+		});
+		await checkOperations(env, now, fetch, 12_000, skipWait);
+		expect(headers.get("/health/detailed")).toBe(expected);
+		expect(headers.get("/health/ready")).toBeNull();
+	});
+}
+
 test("queue age and size thresholds do not flag a small fresh backlog", () => {
 	expect(
 		checkClickQueue(

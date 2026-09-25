@@ -51,7 +51,9 @@
     "OPS_ALERTS_ENABLED": "true",
     "WORKER_VERSION": "prod",
     "CLICK_EVENTS_QUEUE_NAME": "ndle-click-events",
-    "CLICK_EVENTS_FAILED_QUEUE_NAME": "ndle-click-events-failed"
+    "CLICK_EVENTS_FAILED_QUEUE_NAME": "ndle-click-events-failed",
+    // Hosts that serve every link; any other host is a customer custom domain.
+    "SHORT_LINK_HOSTS": "ndle.fyi,www.ndle.fyi"
   },
   
   // Development environment
@@ -99,7 +101,8 @@
         "OPS_ALERTS_ENABLED": "false",
         "WORKER_VERSION": "dev",
         "CLICK_EVENTS_QUEUE_NAME": "ndle-click-events-dev",
-        "CLICK_EVENTS_FAILED_QUEUE_NAME": "ndle-click-events-failed-dev"
+        "CLICK_EVENTS_FAILED_QUEUE_NAME": "ndle-click-events-failed-dev",
+        "SHORT_LINK_HOSTS": "dev.ndle.fyi,www.dev.ndle.fyi"
       }
     }
   },

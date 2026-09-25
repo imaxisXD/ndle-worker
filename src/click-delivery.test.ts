@@ -1,6 +1,12 @@
 import { afterEach, expect, mock, spyOn, test } from "bun:test";
 import { ConvexHttpClient } from "convex/browser";
-import { consumeClicks, parseQueuedClick } from "./click-delivery";
+import {
+	consumeClicks,
+	deliverClick,
+	parseQueuedClick,
+} from "./click-delivery";
+import { resolveFailedClick } from "./failed-click-recovery";
+import { bodyHash, failedClickKeys } from "./failed-clicks";
 import { createLogger } from "./log";
 import type { AnalyticsEvent, Bindings } from "./types";
 
@@ -241,3 +247,137 @@ test("logs retain the request ID, reason, and readable error", () => {
 		error: { message: "Try again" },
 	});
 });
+
+function acceptIngest() {
+	const calls: Array<{ path: string; authorization: string | null }> = [];
+	spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
+		const url = new URL(String(input));
+		calls.push({
+			path: url.pathname,
+			authorization: new Headers(init?.headers).get("Authorization"),
+		});
+		return url.pathname === "/internal/events/receipt"
+			? Response.json({
+					idempotency_key: event.idempotency_key,
+					committed: true,
+					user_id: event.user_id,
+					occurred_at: event.occurred_at,
+					link_id: event.link_id,
+				})
+			: Response.json(
+					{
+						success: true,
+						status: "queued",
+						idempotency_key: event.idempotency_key,
+					},
+					{ status: 202 },
+				);
+	});
+	spyOn(ConvexHttpClient.prototype, "mutation").mockResolvedValue({
+		outcome: "recorded",
+	});
+	return calls;
+}
+
+async function archivedClick() {
+	const body = {
+		encoding: "json" as const,
+		data: JSON.stringify({ version: 1, event }),
+	};
+	const keys = failedClickKeys("ndle-click-events-failed", "message-1");
+	const archive = {
+		version: 1,
+		source: {
+			queue: "ndle-click-events-failed",
+			messageId: "message-1",
+			sentAt: event.occurred_at,
+			attempts: 1,
+		},
+		archivedAt: event.occurred_at,
+		reason: "delivery_failed",
+		eventId: event.idempotency_key,
+		body,
+		bodySha256: await bodyHash(body),
+	};
+	const bucket = {
+		get: async (key: string) =>
+			key === keys.archive ? { size: 1, json: async () => archive } : null,
+	} as unknown as R2Bucket;
+	return { key: keys.archive, bucket };
+}
+
+const scopedSecrets = [
+	{ secrets: { API_SECRET: "shared" }, write: "shared", ops: "shared" },
+	{
+		secrets: {
+			API_SECRET: "shared",
+			INGEST_WRITE_SECRET: "write",
+			OPS_SECRET: "ops",
+		},
+		write: "write",
+		ops: "ops",
+	},
+	{
+		secrets: { INGEST_WRITE_SECRET: "write", OPS_SECRET: "ops" },
+		write: "write",
+		ops: "ops",
+	},
+];
+
+for (const { secrets, write, ops } of scopedSecrets) {
+	const names = Object.keys(secrets).join(", ");
+	const secretEnv = { ...env, API_SECRET: undefined, ...secrets } as Bindings;
+
+	test(`click delivery authorizes ingest with ${write} given ${names}`, async () => {
+		const calls = acceptIngest();
+		expect(await deliverClick(event, secretEnv)).toBe("recorded");
+		expect(calls).toEqual([
+			{ path: "/ingest", authorization: `Bearer ${write}` },
+		]);
+	});
+
+	test(`resolve checks the receipt with ${ops} and delivers with ${write} given ${names}`, async () => {
+		const { key, bucket } = await archivedClick();
+		const calls = acceptIngest();
+		// The fake bucket has no unresolved marker, so resolution stops after
+		// both authenticated ingest requests.
+		await expect(resolveFailedClick(key, bucket, secretEnv)).rejects.toThrow(
+			"no unresolved marker",
+		);
+		expect(calls).toEqual([
+			{ path: "/internal/events/receipt", authorization: `Bearer ${ops}` },
+			{ path: "/ingest", authorization: `Bearer ${write}` },
+		]);
+	});
+}
+
+test("click delivery settings are incomplete without a write or shared secret", async () => {
+	const send = spyOn(globalThis, "fetch");
+	await expect(
+		deliverClick(event, {
+			...env,
+			API_SECRET: undefined,
+			OPS_SECRET: "ops",
+		} as Bindings),
+	).rejects.toThrow("Click delivery settings are incomplete");
+	expect(send).not.toHaveBeenCalled();
+});
+
+for (const secrets of [
+	{ OPS_SECRET: "ops" },
+	{ INGEST_WRITE_SECRET: "write" },
+	{},
+]) {
+	test(`resolve refuses to start with only ${Object.keys(secrets).join(", ") || "no ingest secret"}`, async () => {
+		const { key, bucket } = await archivedClick();
+		const send = spyOn(globalThis, "fetch");
+		await expect(
+			resolveFailedClick(key, bucket, {
+				...env,
+				API_SECRET: undefined,
+				...secrets,
+			} as Bindings),
+		).rejects.toThrow("to verify delivery");
+		expect(send).not.toHaveBeenCalled();
+	});
+}

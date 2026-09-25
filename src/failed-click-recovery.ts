@@ -6,6 +6,7 @@ import {
 	failedClickPrefix,
 	readFailedArchive,
 } from "./failed-clicks";
+import { ingestWriteSecret, opsSecret } from "./ingest-auth";
 import type { Bindings, QueuedClick } from "./types";
 
 export { readFailedArchive } from "./failed-clicks";
@@ -46,14 +47,18 @@ export async function resolveFailedClick(
 			deliveryOutcome: "tracking_disabled",
 		});
 	}
+	// The receipt check uses the operator secret; the repeated delivery below
+	// uses the write secret. Either may fall back to API_SECRET.
+	const receiptToken = opsSecret(env);
 	if (
 		!env.INGEST_ENDPOINT ||
-		!env.API_SECRET ||
+		!receiptToken ||
+		!ingestWriteSecret(env) ||
 		!env.CONVEX_URL ||
 		!env.SHARED_SECRET
 	) {
 		throw new Error(
-			"Set INGEST_ENDPOINT, API_SECRET, CONVEX_URL and SHARED_SECRET to verify delivery",
+			"Set INGEST_ENDPOINT, OPS_SECRET and INGEST_WRITE_SECRET (or API_SECRET), CONVEX_URL and SHARED_SECRET to verify delivery",
 		);
 	}
 	if (
@@ -65,7 +70,7 @@ export async function resolveFailedClick(
 	const receiptUrl = new URL("/internal/events/receipt", env.INGEST_ENDPOINT);
 	receiptUrl.searchParams.set("idempotency_key", event.idempotency_key);
 	const response = await fetch(receiptUrl, {
-		headers: { Authorization: `Bearer ${env.API_SECRET}` },
+		headers: { Authorization: `Bearer ${receiptToken}` },
 		redirect: "manual",
 		signal: AbortSignal.timeout(10_000),
 	});

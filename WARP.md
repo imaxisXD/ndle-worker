@@ -6,7 +6,8 @@ setup, checks, and deployment commands.
 ## Request flow
 
 - `src/index.ts` defines the Hono routes and reads each short-link record from
-  Upstash Redis. Missing records return 404.
+  Upstash Redis. Missing records return 404, as do records that
+  `src/link-domain.ts` does not allow on the request's custom domain.
 - `src/redirect-decision.ts` checks link status and expiry, validates the
   destination, selects any A/B variant, and adds missing UTM parameters. Blocked
   links and invalid destinations return 404 from the route.

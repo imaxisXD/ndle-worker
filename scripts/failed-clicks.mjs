@@ -141,6 +141,8 @@ try {
 					bucket,
 					{
 						INGEST_ENDPOINT: process.env.INGEST_ENDPOINT,
+						INGEST_WRITE_SECRET: process.env.INGEST_WRITE_SECRET,
+						OPS_SECRET: process.env.OPS_SECRET,
 						API_SECRET: process.env.API_SECRET,
 						CONVEX_URL: process.env.CONVEX_URL,
 						SHARED_SECRET: process.env.SHARED_SECRET,

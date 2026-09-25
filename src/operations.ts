@@ -1,4 +1,5 @@
 import { unresolvedClickPrefix } from "./failed-clicks";
+import { opsSecret } from "./ingest-auth";
 import type { Bindings } from "./types";
 
 const minute = 60_000;
@@ -66,6 +67,8 @@ type OperationsBindings = Pick<
 	| "CLICK_EVENTS_FAILED"
 	| "ANALYTICS_BACKUPS"
 	| "FAILED_CLICK_ARCHIVES"
+	// Detailed health uses OPS_SECRET, else the legacy API_SECRET.
+	| "OPS_SECRET"
 	| "API_SECRET"
 	| "INGEST_ENDPOINT"
 	| "MONITOR_READY_ENDPOINT"
@@ -244,14 +247,14 @@ async function readIngestEndpoint(
 	try {
 		return await withDeadline(async () => {
 			const signal = AbortSignal.timeout(10_000);
+			// Without any secret, ingest rejects the request and the HTTP check alerts.
+			const token = endpoint === "detailed" ? opsSecret(env) : undefined;
 			let response: Response;
 			try {
 				response = await sendRequest(
 					new URL(`/health/${endpoint}`, env.INGEST_ENDPOINT),
 					{
-						...(endpoint === "detailed"
-							? { headers: { Authorization: `Bearer ${env.API_SECRET}` } }
-							: {}),
+						...(token ? { headers: { Authorization: `Bearer ${token}` } } : {}),
 						signal,
 						redirect: "manual",
 					},
