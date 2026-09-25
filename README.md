@@ -2,10 +2,23 @@
 
 The Worker reads the current Redis link record, checks that it may open on the
 requested host and is active and unexpired, applies A/B and UTM rules, and
-returns a 302 with browser caching disabled. Tracked redirects wait until
-Cloudflare Queues accepts their event.
-If Redis, event preparation, or queue acceptance fails, the visitor receives a
-retryable 503 instead of a redirect whose click could silently disappear.
+returns a 302 with browser caching disabled. Analytics never decides whether a
+visitor reaches the destination:
+
+- The link lookup is the only failure that answers 503. It has one quick retry
+  and a one-second timeout per attempt.
+- A tracked redirect normally waits for Cloudflare Queues to accept its event,
+  for at most 1.5 s. If the queue fails or is slow, the visitor is redirected
+  anyway and the event is kept after the response: two delayed sends (same
+  event ID, so ingest and Convex count it once), then an unresolved
+  failed-click archive under `failed-clicks/v1/archive/<main queue>/spool-<event ID>.json`
+  that alerts through the operations check and replays with the tool below.
+  An isolate stopped within those ~1.3 s before the archive is written can
+  still lose that click.
+- The first-click-of-session marker has a 300 ms timeout and records `false`
+  when the store is unavailable.
+- A link record that cannot produce a valid event redirects without tracking.
+
 Links with tracking disabled skip event collection and the queue.
 
 ## Click delivery contract
@@ -258,8 +271,9 @@ pnpm deploy:dry-run
 pnpm exec wrangler deploy --env dev --dry-run
 ```
 
-The checks never deploy. Tests cover queue-acceptance ordering, 503 on enqueue
-failure, ignored tracking, atomic session markers, downstream failures, repeated
+The checks never deploy. Tests cover queue-acceptance ordering, redirects that
+survive queue outages, stalls and session-store failures with the click kept
+for replay, 503 only for a failed link lookup, ignored tracking, atomic session markers, downstream failures, repeated
 IDs, terminal Convex outcomes, malformed events, redirect safety, domain binding,
 keyed visitor hashes, scoped ingest secrets, batch delivery and its per-event
 fallback, bounded Convex writes, and both ingest health shapes. CI also runs the actual workerd

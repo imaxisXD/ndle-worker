@@ -35,7 +35,7 @@ function setup(trackingEnabled = true) {
 	return { set };
 }
 
-test("a tracked redirect waits for durable queue acceptance", async () => {
+test("a tracked redirect normally waits for queue acceptance", async () => {
 	setup();
 	let accept: () => void = () => {};
 	const accepted = new Promise<void>((resolve) => {
@@ -58,15 +58,171 @@ test("a tracked redirect waits for durable queue acceptance", async () => {
 	expect(response.headers.get("Cache-Control")).toContain("no-store");
 });
 
-test("queue failure returns a retryable response without a lossy redirect", async () => {
+/** Minimal R2 stand-in with create-only puts, enough for failed-click archives. */
+function memoryBucket() {
+	const objects = new Map<string, string>();
+	const bucket = {
+		async put(
+			key: string,
+			value: string,
+			options?: { onlyIf?: { etagDoesNotMatch?: string } },
+		) {
+			if (options?.onlyIf?.etagDoesNotMatch === "*" && objects.has(key))
+				return null;
+			objects.set(key, value);
+			return {};
+		},
+		async get(key: string) {
+			const value = objects.get(key);
+			if (value === undefined) return null;
+			return {
+				size: value.length,
+				json: async () => JSON.parse(value),
+				text: async () => value,
+			};
+		},
+	};
+	return { objects, bucket: bucket as unknown as R2Bucket };
+}
+
+async function waitFor(check: () => boolean, timeoutMs = 5_000) {
+	const deadline = Date.now() + timeoutMs;
+	while (!check()) {
+		if (Date.now() > deadline) throw new Error("Timed out waiting");
+		await new Promise((resolve) => setTimeout(resolve, 20));
+	}
+}
+
+test("a queue outage still redirects and keeps the click for replay", async () => {
 	setup();
 	const send = mock(async () => {
 		throw new Error("Queue unavailable");
+	});
+	const { objects, bucket } = memoryBucket();
+	const response = await app.request(
+		"https://ndle.test/test",
+		{},
+		{
+			CLICK_EVENTS: { send },
+			FAILED_CLICK_ARCHIVES: bucket,
+			CLICK_EVENTS_QUEUE_NAME: "ndle-click-events",
+		},
+	);
+	expect(response.status).toBe(302);
+	expect(response.headers.get("Location")).toBe("https://example.org/");
+	// Two delayed retries, then an unresolved archive the operator can replay.
+	await waitFor(() => objects.size === 2);
+	expect(send).toHaveBeenCalledTimes(3);
+	const [archiveKey, markerKey] = [...objects.keys()].sort();
+	expect(archiveKey).toMatch(
+		/^failed-clicks\/v1\/archive\/ndle-click-events\/spool-[0-9a-f-]{36}\.json$/,
+	);
+	expect(markerKey).toMatch(/^failed-clicks\/v1\/unresolved\//);
+	const archive = JSON.parse(objects.get(archiveKey) ?? "null");
+	expect(archive.reason).toBe("delivery_failed");
+	expect(JSON.parse(archive.body.data).event.idempotency_key).toBe(
+		archive.eventId,
+	);
+});
+
+test("a queue that recovers during the retry needs no archive", async () => {
+	setup();
+	let calls = 0;
+	const send = mock(async () => {
+		calls++;
+		if (calls === 1) throw new Error("Queue briefly unavailable");
+	});
+	const { objects, bucket } = memoryBucket();
+	const response = await app.request(
+		"https://ndle.test/test",
+		{},
+		{ CLICK_EVENTS: { send }, FAILED_CLICK_ARCHIVES: bucket },
+	);
+	expect(response.status).toBe(302);
+	await waitFor(() => calls === 2);
+	await new Promise((resolve) => setTimeout(resolve, 50));
+	expect(objects.size).toBe(0);
+});
+
+test("a stalled queue holds the redirect only for a bounded wait", async () => {
+	setup();
+	const send = mock(() => new Promise<void>(() => {}));
+	const { bucket } = memoryBucket();
+	const started = Date.now();
+	const response = await app.request(
+		"https://ndle.test/test",
+		{},
+		{ CLICK_EVENTS: { send }, FAILED_CLICK_ARCHIVES: bucket },
+	);
+	expect(response.status).toBe(302);
+	expect(Date.now() - started).toBeLessThan(2_500);
+});
+
+test("an unavailable session store records the click without a first-session flag", async () => {
+	setup();
+	spyOn(Redis, "fromEnv").mockReturnValue({
+		json: {
+			get: async () => ({
+				destination: "https://example.org/",
+				is_active: true,
+				expires_at: null,
+				link_id: "link123",
+				analytics_owner_key: "user:account123",
+				features: { track_clicks: true },
+			}),
+		},
+		set: async () => {
+			throw new Error("Session store unavailable");
+		},
+	} as unknown as Redis);
+	const events: QueuedClick[] = [];
+	const send = mock(async (body: QueuedClick) => {
+		events.push(body);
 	});
 	const response = await app.request(
 		"https://ndle.test/test",
 		{},
 		{ CLICK_EVENTS: { send } },
+	);
+	expect(response.status).toBe(302);
+	expect(events).toHaveLength(1);
+	expect(events[0].event.first_click_of_session).toBe(false);
+});
+
+test("a link record that cannot produce a valid event still redirects", async () => {
+	spyOn(Redis, "fromEnv").mockReturnValue({
+		json: {
+			get: async () => ({
+				destination: "https://example.org/",
+				is_active: true,
+				expires_at: null,
+				features: { track_clicks: true },
+			}),
+		},
+		set: async () => "OK",
+	} as unknown as Redis);
+	const send = mock(async () => {});
+	const response = await app.request(
+		"https://ndle.test/test",
+		{},
+		{ CLICK_EVENTS: { send } },
+	);
+	expect(response.status).toBe(302);
+	expect(send).not.toHaveBeenCalled();
+});
+
+test("a failed link lookup is the only reason a redirect answers 503", async () => {
+	spyOn(Redis, "fromEnv").mockReturnValue({
+		json: {
+			get: async () => {
+				throw new Error("Link store unavailable");
+			},
+		},
+	} as unknown as Redis);
+	const response = await app.request(
+		"https://ndle.test/test",
+		{},
+		{ CLICK_EVENTS: { send: mock(async () => {}) } },
 	);
 	expect(response.status).toBe(503);
 	expect(response.headers.get("Location")).toBeNull();

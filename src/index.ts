@@ -1,5 +1,4 @@
-import { Redis } from "@upstash/redis/cloudflare";
-import { Hono } from "hono";
+import { type Context, Hono } from "hono";
 import { normalizeAnalyticsEvent } from "./analytics";
 import { parseQueuedClick } from "./click-envelope";
 import {
@@ -13,6 +12,7 @@ import { createRequestLogger } from "./log";
 import { checkOperations } from "./operations";
 import { consumeQueue } from "./queue-handler";
 import { decideRedirect } from "./redirect-decision";
+import { linkStore, sendClick, spoolClick } from "./redirect-tracking";
 import type { Bindings, RedisValueObject } from "./types";
 
 export const app = new Hono<{ Bindings: Bindings }>();
@@ -36,9 +36,7 @@ app.get("/:websiteSlug{[A-Za-z0-9_-]+}", async (c) => {
 	const log = createRequestLogger(c, { slug, request_id: requestId });
 	if (c.req.method !== "GET") return c.text("Method not allowed", 405);
 	try {
-		const redisValue = await Redis.fromEnv(c.env).json.get<RedisValueObject>(
-			slug,
-		);
+		const redisValue = await linkStore(c.env).json.get<RedisValueObject>(slug);
 		if (!redisValue) return c.notFound();
 		const domainDecision = checkLinkDomain({
 			host: new URL(c.req.url).hostname,
@@ -68,28 +66,39 @@ app.get("/:websiteSlug{[A-Za-z0-9_-]+}", async (c) => {
 		const trackingEnabled =
 			getBooleanEnv(c.env.TRACKING_ENABLED, true) &&
 			redisValue.features?.track_clicks !== false;
+		// Analytics never decides whether a visitor reaches the destination.
+		// Normally the queue accepts the click before the redirect is sent; if
+		// it cannot within a short wait, the click is kept after the response.
+		let clickQueued: boolean | null = null;
 		if (trackingEnabled) {
-			const event = normalizeAnalyticsEvent(
-				await buildAnalyticsInput(
-					c,
-					decision.destination.toString(),
-					slug,
-					Date.now() - start,
-					redisValue,
-					decision.variantId,
-					requestId,
-				),
-			);
-			// A tracked redirect means the event has been accepted durably.
-			// Do not replace this await with waitUntil or direct HTTP fanout.
-			await c.env.CLICK_EVENTS.send(parseQueuedClick({ version: 1, event }), {
-				contentType: "json",
-			});
+			try {
+				const click = parseQueuedClick({
+					version: 1,
+					event: normalizeAnalyticsEvent(
+						await buildAnalyticsInput(
+							c,
+							decision.destination.toString(),
+							slug,
+							Date.now() - start,
+							redisValue,
+							decision.variantId,
+							requestId,
+						),
+					),
+				});
+				clickQueued = await sendClick(c.env.CLICK_EVENTS, click);
+				if (!clickQueued) runAfterResponse(c, spoolClick(c.env, click, log));
+			} catch (error) {
+				// A link record that cannot produce a valid event still redirects.
+				clickQueued = false;
+				log.error("Click could not be recorded for this redirect", { error });
+			}
 		}
 		log.info("Redirect ready", {
 			status: 302,
 			latency_ms: Date.now() - start,
 			tracking_enabled: trackingEnabled,
+			click_queued: clickQueued,
 		});
 		return buildClientRedirectResponse(decision.destination);
 	} catch (error) {
@@ -110,6 +119,18 @@ app.get("/:websiteSlug{[A-Za-z0-9_-]+}", async (c) => {
 		);
 	}
 });
+
+function runAfterResponse(
+	c: Context<{ Bindings: Bindings }>,
+	work: Promise<void>,
+) {
+	try {
+		c.executionCtx.waitUntil(work);
+	} catch {
+		// Local test requests have no execution context.
+		void work;
+	}
+}
 
 export default {
 	fetch: app.fetch,

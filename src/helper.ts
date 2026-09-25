@@ -1,5 +1,5 @@
-import { Redis } from "@upstash/redis/cloudflare";
 import type { Context } from "hono";
+import { sessionStore } from "./redirect-tracking";
 import type { AnalyticsEventInput, RedisValueObject } from "./types";
 
 /**
@@ -422,11 +422,19 @@ async function buildAnalyticsInput(
 	// Generate session ID based on IP hash and user agent
 	const sessionId = await generateSessionId(ipHash, userAgent);
 
-	// Track first-click-of-session using Redis short-lived key
-	const redis = Redis.fromEnv(c.env);
+	// Track first-click-of-session using a short-lived key. It is analytics
+	// detail only: an unavailable store records false instead of failing the link.
 	const sessionKey = `session:${sessionId}:${slug}`;
-	const firstClickOfSession =
-		(await redis.set(sessionKey, requestId, { nx: true, ex: 1800 })) === "OK";
+	let firstClickOfSession = false;
+	try {
+		firstClickOfSession =
+			(await sessionStore(c.env).set(sessionKey, requestId, {
+				nx: true,
+				ex: 1800,
+			})) === "OK";
+	} catch {
+		firstClickOfSession = false;
+	}
 
 	const utm_source =
 		url.searchParams.get("utm_source") ||
