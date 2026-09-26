@@ -34,7 +34,11 @@ app.get("/:websiteSlug{[A-Za-z0-9_-]+}", async (c) => {
 	const slug = c.req.param("websiteSlug");
 	const requestId = crypto.randomUUID();
 	const log = createRequestLogger(c, { slug, request_id: requestId });
-	if (c.req.method !== "GET") return c.text("Method not allowed", 405);
+	// Link checkers (previews, uptime tools, email scanners) often send HEAD
+	// first. Answer with the same redirect, but never count it as a click.
+	const isHead = c.req.method === "HEAD";
+	if (c.req.method !== "GET" && !isHead)
+		return c.text("Method not allowed", 405);
 	try {
 		const redisValue = await linkStore(c.env).json.get<RedisValueObject>(slug);
 		if (!redisValue) return c.notFound();
@@ -64,6 +68,7 @@ app.get("/:websiteSlug{[A-Za-z0-9_-]+}", async (c) => {
 			return c.notFound();
 		}
 		const trackingEnabled =
+			!isHead &&
 			getBooleanEnv(c.env.TRACKING_ENABLED, true) &&
 			redisValue.features?.track_clicks !== false;
 		// Analytics never decides whether a visitor reaches the destination.

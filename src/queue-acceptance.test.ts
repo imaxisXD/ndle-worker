@@ -336,3 +336,38 @@ test("IP_HASH_SECRET keys the visitor hash and the session derived from it", asy
 		);
 	}
 });
+
+test("HEAD gets the same redirect but is never counted", async () => {
+	const { set } = setup();
+	const send = mock(async () => {});
+	const response = await app.request(
+		"https://ndle.test/test",
+		{ method: "HEAD" },
+		{ CLICK_EVENTS: { send } },
+	);
+	expect(response.status).toBe(302);
+	expect(response.headers.get("Location")).toBe("https://example.org/");
+	expect(send).not.toHaveBeenCalled();
+	expect(set).not.toHaveBeenCalled();
+});
+
+test("prefetch and prerender requests are recorded as bots", async () => {
+	setup();
+	const events: QueuedClick[] = [];
+	const send = mock(async (body: QueuedClick) => {
+		events.push(body);
+	});
+	const browser =
+		"Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/129.0.0.0 Safari/537.36";
+	for (const headers of [
+		{ "user-agent": browser },
+		{ "user-agent": browser, "sec-purpose": "prefetch;prerender" },
+		{ "user-agent": browser, purpose: "prefetch" },
+	])
+		await app.request(
+			"https://ndle.test/test",
+			{ headers },
+			{ CLICK_EVENTS: { send } },
+		);
+	expect(events.map(({ event }) => event.is_bot)).toEqual([false, true, true]);
+});

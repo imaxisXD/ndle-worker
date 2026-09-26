@@ -16,10 +16,9 @@ function buildClientRedirectResponse(location: URL): Response {
 			Pragma: "no-cache",
 			Expires: "0",
 			"Content-Type": "text/plain; charset=utf-8",
-			// Encourage browsers to send UA-CH on subsequent requests
+			// Ask for UA-CH on later requests only. Critical-CH made Chromium repeat
+			// the first navigation to get these hints, which counted a click twice.
 			"Accept-CH":
-				"Sec-CH-UA, Sec-CH-UA-Platform, Sec-CH-UA-Mobile, Sec-CH-UA-Full-Version-List",
-			"Critical-CH":
 				"Sec-CH-UA, Sec-CH-UA-Platform, Sec-CH-UA-Mobile, Sec-CH-UA-Full-Version-List",
 		}),
 	});
@@ -47,15 +46,52 @@ function isPrivateIpv4(hostname: string): boolean {
 	);
 }
 
+/** Expands an IPv6 literal (with or without brackets) into eight groups. */
+function ipv6Groups(hostname: string): number[] | null {
+	let value = hostname.toLowerCase().replace(/^\[|\]$/g, "");
+	const dotted = /(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/.exec(value);
+	if (dotted) {
+		const bytes = dotted.slice(1).map(Number);
+		if (bytes.some((byte) => byte > 255)) return null;
+		value = `${value.slice(0, dotted.index)}${((bytes[0] << 8) | bytes[1]).toString(16)}:${((bytes[2] << 8) | bytes[3]).toString(16)}`;
+	}
+	const halves = value.split("::");
+	if (halves.length > 2) return null;
+	const head = halves[0] ? halves[0].split(":") : [];
+	const tail = halves.length === 2 && halves[1] ? halves[1].split(":") : [];
+	const missing = 8 - head.length - tail.length;
+	if (halves.length === 1 ? missing !== 0 : missing < 1) return null;
+	const groups = [
+		...head,
+		...Array(halves.length === 2 ? missing : 0).fill("0"),
+		...tail,
+	];
+	if (!groups.every((group) => /^[0-9a-f]{1,4}$/.test(group))) return null;
+	return groups.map((group) => Number.parseInt(group, 16));
+}
+
 function isPrivateIpv6(hostname: string): boolean {
-	const normalized = hostname.toLowerCase();
+	const groups = ipv6Groups(hostname);
+	// Anything that looks like an address but can't be parsed is refused.
+	if (!groups) return true;
+	const [first] = groups;
+	const leadingZeros = groups.slice(0, 5).every((group) => group === 0);
+	// IPv4-mapped (::ffff:a.b.c.d) and IPv4-compatible (::a.b.c.d) forms.
+	if (leadingZeros && (groups[5] === 0xffff || groups[5] === 0)) {
+		if (groups[5] === 0 && groups[6] === 0 && groups[7] <= 1) return true; // :: and ::1
+		const ipv4 = [
+			groups[6] >> 8,
+			groups[6] & 0xff,
+			groups[7] >> 8,
+			groups[7] & 0xff,
+		];
+		return isPrivateIpv4(ipv4.join("."));
+	}
 	return (
-		normalized === "::" ||
-		normalized === "::1" ||
-		normalized.startsWith("fc") ||
-		normalized.startsWith("fd") ||
-		normalized.startsWith("fe80:") ||
-		normalized.startsWith("2001:db8:")
+		(first & 0xfe00) === 0xfc00 || // fc00::/7 unique local
+		(first & 0xffc0) === 0xfe80 || // fe80::/10 link local
+		(first === 0x2001 && groups[1] === 0x0db8) || // documentation
+		first >= 0xff00 // multicast
 	);
 }
 
@@ -68,7 +104,7 @@ function assertSafeDestinationUrl(input: string | URL): URL {
 		throw new Error("Destination URLs cannot include credentials");
 	}
 
-	const hostname = url.hostname.toLowerCase();
+	const hostname = url.hostname.toLowerCase().replace(/\.$/, "");
 	if (hostname === "localhost" || hostname.endsWith(".localhost")) {
 		throw new Error("Local destination hosts are blocked");
 	}
@@ -243,6 +279,23 @@ function getOS(
 /**
  * Bot detection using Cloudflare Bot Management when available, else UA regex fallback.
  */
+/**
+ * Requests a browser makes without a person clicking: prefetch and prerender
+ * of links on a page, and preview fetches.
+ */
+function isAutomaticFetch(readHeader: (name: string) => string | undefined) {
+	const purpose = [
+		readHeader("sec-purpose"),
+		readHeader("purpose"),
+		readHeader("x-purpose"),
+		readHeader("x-moz"),
+	]
+		.filter(Boolean)
+		.join(",")
+		.toLowerCase();
+	return /prefetch|prerender|preview/.test(purpose);
+}
+
 function isBot(
 	userAgent: string,
 	cf?: { botManagement?: { verifiedBot?: boolean; score?: number } },
@@ -260,11 +313,14 @@ function isBot(
 		// Ignore errors and fallback to UA
 	}
 
-	if (!userAgent) return false;
+	// Every real browser sends a user agent; scripts often don't.
+	if (!userAgent.trim()) return true;
 	const ua = userAgent.toLowerCase();
-	// Broad but safe list of common bot indicators
+	// Crawlers, HTTP libraries, chat/social link previews and the link checks
+	// email and office apps run before a person clicks. In-app browsers where a
+	// person really clicked (e.g. Pinterest, Outlook mobile) are not listed.
 	const botRegex =
-		/(bot|crawler|spider|crawling|curl|wget|httpclient|python-requests|libwww|bingpreview|facebookexternalhit|slurp|mediapartners-google|phantomjs|headless|puppeteer|lighthouse|semrush|ahrefs|yandex|googlebot|bingbot|duckduckbot)/i;
+		/(bot|crawler|spider|crawling|curl|wget|httpclient|python-requests|python-urllib|aiohttp|libwww|go-http-client|okhttp|axios|node-fetch|undici|java\/|apache-httpclient|guzzle|postmanruntime|insomnia|bingpreview|facebookexternalhit|facebookcatalog|slurp|mediapartners-google|googleimageproxy|google-inspectiontool|googleother|phantomjs|headless|puppeteer|playwright|lighthouse|semrush|ahrefs|yandex|duckduckbot|whatsapp|skypeuripreview|microsoftpreview|ms-office|microsoft office existence discovery|embedly|iframely|vkshare)/i;
 	return botRegex.test(ua);
 }
 
@@ -487,7 +543,8 @@ async function buildAnalyticsInput(
 		utm_campaign,
 		utm_term,
 		utm_content,
-		is_bot: isBot(userAgent, cf),
+		is_bot:
+			isBot(userAgent, cf) || isAutomaticFetch((name) => req.header(name)),
 		language,
 		timezone: cf.timezone ?? null,
 		variant_id: variantId ?? null,

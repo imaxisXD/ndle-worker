@@ -21,6 +21,15 @@ visitor reaches the destination:
 
 Links with tracking disabled skip event collection and the queue.
 
+HEAD requests (link previewers, uptime tools, email scanners) get the same
+redirect but are never counted. Clicks are marked `is_bot` for crawlers, HTTP
+libraries, chat/social link previews, email and office link checks, requests
+without a user agent, and browser prefetch/prerender (`Sec-Purpose`,
+`Purpose`, `X-Purpose`, `X-Moz`); they are still stored and appear in bot
+counts. In-app browsers where a person really clicked are not treated as bots.
+Redirects send `Accept-CH` but not `Critical-CH`, which made Chromium repeat a
+first visit to obtain the hints and so count it twice.
+
 ## Click delivery contract
 
 The producer writes `{ version: 1, event }`. The normalized event has one generated
