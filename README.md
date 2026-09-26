@@ -239,15 +239,25 @@ health is healthy, those other alerts send without the confirmation delay. Both 
 failures that recover. This adds no notification database or cross-run state;
 the next five-minute check remains independent.
 
-Healthy checks send no email. A stable issue set, recipient and sender use the
-same provider idempotency key within a UTC hour, avoiding duplicate mail on
-retries and overlapping runs. Persistent problems remind at most once per hour;
-a changed set can send another alert. Resend retains these keys for
-[24 hours](https://resend.com/docs/dashboard/emails/idempotency-keys). Provider
-rejection fails the scheduled run and is logged; acceptance is not proof that
-the recipient read the message. Observe Cron executions and provider delivery
-status after deployment. A failure of the alert provider or Cloudflare itself
-still requires an independent external check.
+Each email is written for a person, not a log reader (`src/alert-email.ts`).
+Every problem says what was measured (counts and ages only), what it means for
+visitors and data, whether anything is lost, numbered steps with links and
+commands to check and fix it, and how to tell it is fixed. Problems that often
+clear by themselves after a deploy say so. Times are shown in
+`OPS_ALERT_TIMEZONE` (production: `Asia/Kolkata`) and UTC. Saved failed clicks
+are listed with their exact `inspect`, `replay` and `resolve` commands.
+
+Healthy checks send no email. The last emailed problems are saved in
+`operations/alert-state.json` in the analytics bucket: an unchanged set is
+repeated at most once an hour (with how long it has lasted), a changed set is
+sent at once, and when every check passes again one all-clear email names what
+was fixed. Each email's provider idempotency key includes a hash of its body, so
+retries of the same email are sent once. If the saved state cannot be read, the
+email drops its changing numbers and uses an hourly key so reminders stay hourly.
+Provider rejection fails the scheduled run and is logged; acceptance is not proof
+that the recipient read the message. Observe Cron executions and provider
+delivery status after deployment. A failure of the alert provider or Cloudflare
+itself still requires an independent external check.
 
 Queue age is based on Cloudflare's reported oldest timestamp. A small backlog
 without that timestamp cannot establish its age. Ingest's detailed endpoint

@@ -416,12 +416,13 @@ try {
 			assert.equal(result.accepted, true);
 			assert.deepEqual(
 				result.calls.find((call) => call.method === "list").options,
-				{ prefix: `${root}unresolved/`, limit: 1 },
+				{ prefix: `${root}unresolved/`, limit: 20 },
 			);
-			assert.match(
-				outbound.find((call) => call.email).email.text,
-				/Archived failed clicks still need investigation/,
-			);
+			const email = outbound.find((call) => call.email).email;
+			assert.match(email.text, /Failed clicks are waiting for you to replay them/);
+			// The email names the saved click and the exact replay commands.
+			assert.match(email.text, /node scripts\/failed-clicks\.mjs replay /);
+			assert.match(email.html, /<ol/);
 		},
 	);
 	await run(
@@ -485,8 +486,8 @@ try {
 			);
 			const emails = outbound.filter((call) => call.email);
 			assert.equal(emails.length, 1);
-			assert.match(emails[0].email.text, /scan of saved events is overdue/);
-			assert.match(emails[0].email.text, /has not completed a recent check/);
+			assert.match(emails[0].email.text, /An old analytics scan is overdue/);
+			assert.match(emails[0].email.text, /Old analytics recovery hasn't checked in/);
 			assert.doesNotMatch(emails[0].email.text, /PRIVATE-service-secret/);
 		},
 	);
@@ -509,8 +510,8 @@ try {
 			assert.equal(result.accepted, true);
 			const emails = outbound.filter((call) => call.email);
 			assert.equal(emails.length, 1);
-			assert.match(emails[0].email.text, /failed event jobs/);
-			assert.match(emails[0].email.text, /Archived failed clicks/);
+			assert.match(emails[0].email.text, /The old analytics queue has failed jobs/);
+			assert.match(emails[0].email.text, /Failed clicks are waiting for you to replay them/);
 			assert.doesNotMatch(emails[0].email.text, /recovery check failed/);
 		},
 	);
@@ -522,7 +523,7 @@ try {
 			assert.equal(outbound.filter((call) => call.email).length, 1);
 			assert.match(
 				outbound.find((call) => call.email).email.text,
-				/could not connect/,
+				/The analytics service can't be reached/,
 			);
 		},
 	);
@@ -539,7 +540,7 @@ try {
 			assert.match(result.error, /email was not accepted \(HTTP 302\)/);
 			assert.match(
 				outbound.find((call) => call.email).email.text,
-				/unexpected HTTP status/,
+				/The analytics service returned an error/,
 			);
 			assert.equal(
 				outbound.some(

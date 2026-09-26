@@ -53,6 +53,8 @@
     "INGEST_ENDPOINT": "https://api.ndle.app/ingest",
     "MONITOR_READY_ENDPOINT": "https://monitor.ndle.app/ready",
     "OPS_ALERTS_ENABLED": "true",
+    // Alert emails show times in this zone as well as UTC.
+    "OPS_ALERT_TIMEZONE": "Asia/Kolkata",
     "WORKER_VERSION": "prod",
     "CLICK_EVENTS_QUEUE_NAME": "ndle-click-events",
     "CLICK_EVENTS_FAILED_QUEUE_NAME": "ndle-click-events-failed",
@@ -104,6 +106,7 @@
         "INGEST_ENDPOINT": "",
         "MONITOR_READY_ENDPOINT": "",
         "OPS_ALERTS_ENABLED": "false",
+        "OPS_ALERT_TIMEZONE": "Asia/Kolkata",
         "WORKER_VERSION": "dev",
         "CLICK_EVENTS_QUEUE_NAME": "ndle-click-events-dev",
         "CLICK_EVENTS_FAILED_QUEUE_NAME": "ndle-click-events-failed-dev",

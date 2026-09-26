@@ -137,7 +137,7 @@ test("queue age and size thresholds do not flag a small fresh backlog", () => {
 	).toEqual([]);
 });
 
-test("several failing checks send one bounded alert with the same retry key and body", async () => {
+function failingEnvironment() {
 	const env = environment();
 	env.CLICK_EVENTS.metrics = async () => ({
 		backlogCount: 1,
@@ -149,6 +149,10 @@ test("several failing checks send one bounded alert with the same retry key and 
 		backlogBytes: 100,
 	});
 	env.ANALYTICS_BACKUPS.head = mock(async () => null);
+	return env;
+}
+
+function captureEmails() {
 	const emails: Array<{ headers: Headers; body: string }> = [];
 	spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
 		if (String(input).includes("resend.com")) {
@@ -170,6 +174,69 @@ test("several failing checks send one bounded alert with the same retry key and 
 				: { status: "not ready" },
 		);
 	});
+	return emails;
+}
+
+/** The backup manifest plus an in-memory alert state object. */
+function withAlertState(env: Bindings) {
+	const objects = new Map<string, string>();
+	const manifestGet = env.ANALYTICS_BACKUPS.get;
+	env.ANALYTICS_BACKUPS.get = (async (key: string) => {
+		if (key !== "operations/alert-state.json") return manifestGet(key);
+		const value = objects.get(key);
+		return value === undefined
+			? null
+			: { size: value.length, json: async () => JSON.parse(value) };
+	}) as unknown as Bindings["ANALYTICS_BACKUPS"]["get"];
+	env.ANALYTICS_BACKUPS.put = (async (key: string, value: string) => {
+		objects.set(key, value);
+	}) as unknown as Bindings["ANALYTICS_BACKUPS"]["put"];
+	env.ANALYTICS_BACKUPS.delete = (async (key: string) => {
+		objects.delete(key);
+	}) as unknown as Bindings["ANALYTICS_BACKUPS"]["delete"];
+	return objects;
+}
+
+test("several failing checks send one plain-language alert and repeat it at most hourly", async () => {
+	const env = failingEnvironment();
+	const state = withAlertState(env);
+	const emails = captureEmails();
+	await checkOperations(env, now, fetch, 12_000, skipWait);
+	await checkOperations(env, now + 5 * 60_000, fetch, 12_000, skipWait);
+	expect(emails).toHaveLength(1);
+	expect(state.has("operations/alert-state.json")).toBe(true);
+	await checkOperations(env, now + 61 * 60_000, fetch, 12_000, skipWait);
+	expect(emails).toHaveLength(2);
+	expect(emails[0].headers.get("Idempotency-Key")?.length).toBeLessThan(256);
+	const message = JSON.parse(emails[0].body);
+	expect(message.to).toEqual(["owner@example.test"]);
+	expect(message.subject).toBe(
+		"[NDLE] Needs attention: The latest backup couldn't be found or verified (+5 more)",
+	);
+	for (const expected of [
+		"Clicks are waiting longer than usual to be counted",
+		"What we measured: 1 click is waiting (1 KB); the oldest has waited 6 minutes.",
+		"Is anything lost? No. Waiting clicks are kept for 14 days",
+		"What to do:",
+		"It's fixed when:",
+		"The old analytics queue has failed jobs",
+		"couldn't be found or verified",
+	])
+		expect(message.text).toContain(expected);
+	expect(message.html).toContain("<ol");
+	expect(message.text).not.toContain("ingest-test-key");
+	// The reminder an hour later says how long the problem has lasted.
+	expect(JSON.parse(emails[1].body).text).toContain("about 1 hour");
+});
+
+test("without saved state the hourly email is identical so the provider sends it once", async () => {
+	const env = failingEnvironment();
+	env.ANALYTICS_BACKUPS.get = (async (key: string) => {
+		if (key === "operations/alert-state.json")
+			throw new Error("R2 unavailable");
+		return { size: 300, json: async () => manifest };
+	}) as unknown as Bindings["ANALYTICS_BACKUPS"]["get"];
+	const emails = captureEmails();
 	await checkOperations(env, now, fetch, 12_000, skipWait);
 	await checkOperations(env, now + 5 * 60_000, fetch, 12_000, skipWait);
 	expect(emails).toHaveLength(2);
@@ -177,13 +244,58 @@ test("several failing checks send one bounded alert with the same retry key and 
 		emails[1].headers.get("Idempotency-Key"),
 	);
 	expect(emails[0].body).toBe(emails[1].body);
-	expect(emails[0].headers.get("Idempotency-Key")?.length).toBeLessThan(256);
-	const message = JSON.parse(emails[0].body);
-	expect(message.to).toEqual(["owner@example.test"]);
-	expect(message.text).toContain("more than 5 minutes");
-	expect(message.text).toContain("failed event jobs");
-	expect(message.text).toContain("missing or invalid");
-	expect(message.text).not.toContain("ingest-test-key");
+});
+
+test("an all-clear email names the problems that were fixed", async () => {
+	const env = failingEnvironment();
+	const state = withAlertState(env);
+	const emails = captureEmails();
+	await checkOperations(env, now, fetch, 12_000, skipWait);
+	const healthyEnv = {
+		...environment(),
+		ANALYTICS_BACKUPS: env.ANALYTICS_BACKUPS,
+	};
+	healthyEnv.ANALYTICS_BACKUPS.head = mock(async () => ({
+		size: manifest.size,
+	}));
+	spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
+		if (String(input).includes("resend.com")) {
+			emails.push({
+				headers: new Headers(init?.headers),
+				body: String(init?.body),
+			});
+			return Response.json({ id: "all-clear" });
+		}
+		return Response.json(
+			String(input).includes("/health/detailed")
+				? healthy
+				: { status: "ready" },
+		);
+	});
+	await checkOperations(
+		healthyEnv as Bindings,
+		now + 10 * 60_000,
+		fetch,
+		12_000,
+		skipWait,
+	);
+	expect(emails).toHaveLength(2);
+	const clear = JSON.parse(emails[1].body);
+	expect(clear.subject).toBe("[NDLE] All clear: everything is working again");
+	expect(clear.text).toContain(
+		"Clicks: Clicks are waiting longer than usual to be counted",
+	);
+	expect(clear.text).toContain("lasted about 10 minutes");
+	expect(state.has("operations/alert-state.json")).toBe(false);
+	// Later healthy checks stay silent.
+	await checkOperations(
+		healthyEnv as Bindings,
+		now + 15 * 60_000,
+		fetch,
+		12_000,
+		skipWait,
+	);
+	expect(emails).toHaveLength(2);
 });
 
 test("expired backups and failed metric reads produce actionable alerts", async () => {
@@ -211,8 +323,8 @@ test("expired backups and failed metric reads produce actionable alerts", async 
 		);
 	});
 	await checkOperations(env, now, fetch, 12_000, skipWait);
-	expect(text).toContain("more than 26 hours");
-	expect(text).toContain("delivery queue could not be checked");
+	expect(text).toContain("more than a day old");
+	expect(text).toContain("Could not read the click queue's status");
 });
 
 test("provider rejection fails the run instead of claiming email delivery", async () => {
@@ -241,11 +353,11 @@ test("development is silent and reminder keys change only at the next hour", asy
 	const send = spyOn(globalThis, "fetch");
 	await checkOperations(env, now, fetch, 12_000, skipWait);
 	expect(send).not.toHaveBeenCalled();
-	expect(buildAlert(["failed_clicks", "backup_old"], now)).toEqual(
+	expect(buildAlert(["failed_clicks", "backup_old"], now).key).toBe(
 		buildAlert(
 			["backup_old", "failed_clicks", "failed_clicks"],
 			now + 5 * 60_000,
-		),
+		).key,
 	);
 	expect(buildAlert(["failed_clicks"], now).key).not.toBe(
 		buildAlert(["failed_clicks"], now + 60 * 60_000).key,
@@ -267,7 +379,7 @@ test("an unready database alerts even when detailed component checks look health
 		);
 	});
 	await checkOperations(environment(), now, fetch, 12_000, skipWait);
-	expect(text).toContain("not ready to accept events");
+	expect(text).toContain("up but not accepting clicks");
 });
 
 test("stalled native bindings cannot suppress a known failed-event alert", async () => {
@@ -291,9 +403,11 @@ test("stalled native bindings cannot suppress a known failed-event alert", async
 		);
 	});
 	await checkOperations(env, now, fetch, 10);
-	expect(text).toContain("delivery queue could not be checked");
-	expect(text).toContain("failed-click queue contains events");
-	expect(text).toContain("backup or its manifest is missing or invalid");
+	expect(text).toContain("Could not read the click queue's status");
+	expect(text).toContain(
+		"Some clicks could not be delivered and were set aside",
+	);
+	expect(text).toContain("couldn't be found or verified");
 });
 
 test("redirected health checks alert and redirected email delivery fails without following", async () => {
@@ -314,8 +428,8 @@ test("redirected health checks alert and redirected email delivery fails without
 	await expect(
 		checkOperations(environment(), now, fetch, 12_000, skipWait),
 	).rejects.toThrow("email was not accepted (HTTP 302)");
-	expect(message).toContain("unexpected HTTP status");
-	expect(message).toContain("link-monitoring service did not pass");
+	expect(message).toContain("The analytics service returned an error");
+	expect(message).toContain("Link monitoring is not running");
 	expect(calls).toEqual([
 		"https://monitor.ndle.app/ready",
 		"https://api.ndle.app/health/ready",
@@ -423,11 +537,13 @@ test("health recovery preserves initial failed jobs, large queues, and unresolve
 	await checkOperations(env, now, fixture.send, 12_000, skipWait);
 	expect(fixture.emails).toHaveLength(1);
 	const text = JSON.parse(fixture.emails[0].body).text;
-	expect(text).toContain("failed event jobs");
-	expect(text).toContain("1,000 waiting event jobs");
-	expect(text).toContain("failed-click queue contains events");
-	expect(text).toContain("Archived failed clicks");
-	expect(text).toContain("event records that need investigation");
+	expect(text).toContain("The old analytics queue has failed jobs");
+	expect(text).toContain("The old analytics queue is backed up");
+	expect(text).toContain(
+		"Some clicks could not be delivered and were set aside",
+	);
+	expect(text).toContain("Failed clicks are waiting for you to replay them");
+	expect(text).toContain("Old analytics recovery found records to review");
 	expect(text).not.toContain("recovery check failed");
 	expect(env.CLICK_EVENTS_FAILED.metrics).toHaveBeenCalledTimes(1);
 	expect(env.FAILED_CLICK_ARCHIVES.list).toHaveBeenCalledTimes(1);
@@ -465,11 +581,13 @@ test("persistent recovery flags have fixed messages and stable hourly keys despi
 		12_000,
 		skipWait,
 	);
-	expect(a.emails).toEqual(b.emails);
-	expect(a.emails[0].body).toContain("scan of saved events is overdue");
-	expect(a.emails[0].body).toContain(
-		"scan of saved events reports a recent error",
+	expect(a.emails).toHaveLength(1);
+	expect(b.emails).toHaveLength(1);
+	expect(JSON.parse(a.emails[0].body).subject).toBe(
+		JSON.parse(b.emails[0].body).subject,
 	);
+	expect(a.emails[0].body).toContain("An old analytics scan is overdue");
+	expect(a.emails[0].body).toContain("An old analytics scan reported an error");
 	expect(JSON.stringify([a.emails, log.mock.calls])).not.toContain(
 		"PRIVATE-secret",
 	);
@@ -582,7 +700,7 @@ for (const [name, detailed, expectedEmail] of [
 			status: "error",
 			checks: { ...journalHealthy.checks, journal: { status: "error" } },
 		},
-		"event journal or its startup replay failed",
+		"The off-site copy of new clicks had a problem",
 	],
 ] as const) {
 	test(name, async () => {
@@ -620,17 +738,17 @@ test("HTTP, network, malformed and stalled health checks remain distinct and nev
 	failedJobs.checks.queue.details.failed = 1;
 	const examples = [
 		{
-			issue: "unexpected HTTP status",
+			issue: "The analytics service returned an error",
 			ready: async () => new Response(null, { status: 502 }),
 		},
 		{
-			issue: "could not connect",
+			issue: "can't be reached",
 			ready: async () => {
 				throw new Error("private-network-secret");
 			},
 		},
 		{
-			issue: "invalid response",
+			issue: "health report wasn't understood",
 			ready: async () => Response.json({ status: "secret-status" }),
 		},
 		{ issue: "did not finish", ready: () => new Promise<Response>(() => {}) },
@@ -643,7 +761,9 @@ test("HTTP, network, malformed and stalled health checks remain distinct and nev
 		expect(wait).toHaveBeenCalledTimes(1);
 		expect(fixture.emails).toHaveLength(1);
 		expect(fixture.emails[0].body).toContain(example.issue);
-		expect(fixture.emails[0].body).toContain("failed event jobs");
+		expect(fixture.emails[0].body).toContain(
+			"The old analytics queue has failed jobs",
+		);
 	}
 	expect(JSON.stringify(log.mock.calls)).not.toContain("secret");
 });
@@ -660,8 +780,10 @@ test("a malformed second response alerts instead of treating an uncertain recove
 	]);
 	await checkOperations(environment(), now, fixture.send, 12_000, skipWait);
 	expect(fixture.emails).toHaveLength(1);
-	expect(fixture.emails[0].body).toContain("invalid response");
-	expect(fixture.emails[0].body).toContain("failed event jobs");
+	expect(fixture.emails[0].body).toContain("health report wasn't understood");
+	expect(fixture.emails[0].body).toContain(
+		"The old analytics queue has failed jobs",
+	);
 	expect(fixture.emails[0].body).not.toContain("stopped making progress");
 });
 
@@ -674,8 +796,12 @@ test("HTTP 503 cannot be hidden by a healthy component body containing failed jo
 	const wait = mock(skipWait);
 	await checkOperations(environment(), now, fixture.send, 12_000, wait);
 	expect(wait).toHaveBeenCalledTimes(1);
-	expect(fixture.emails[0].body).toContain("unexpected HTTP status");
-	expect(fixture.emails[0].body).toContain("failed event jobs");
+	expect(fixture.emails[0].body).toContain(
+		"The analytics service returned an error",
+	);
+	expect(fixture.emails[0].body).toContain(
+		"The old analytics queue has failed jobs",
+	);
 });
 
 test("HTTP aborts before headers and during the response body are logged as ten-second timeouts", async () => {
@@ -696,11 +822,11 @@ test("HTTP aborts before headers and during the response body are logged as ten-
 			},
 		});
 		await checkOperations(environment(), now, fixture.send, 12_000, skipWait);
-		expect(fixture.emails[0].body).toContain(
-			"did not finish before its deadline",
+		expect(fixture.emails[0].body).toContain("responding very slowly");
+		expect(fixture.emails[0].body).not.toContain(
+			"health report wasn't understood",
 		);
-		expect(fixture.emails[0].body).not.toContain("invalid response");
-		expect(fixture.emails[0].body).not.toContain("could not connect");
+		expect(fixture.emails[0].body).not.toContain("can't be reached");
 		const evidence = log.mock.calls
 			.map((call) => JSON.parse(String(call[0])))
 			.filter((value) => value.phase === "confirmation")

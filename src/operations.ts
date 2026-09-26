@@ -1,68 +1,20 @@
+import {
+	type AlertContext,
+	type AlertLinks,
+	buildAlertEmail,
+	buildAllClearEmail,
+	describeDuration,
+	type FailedClickRef,
+	type Issue,
+	issuePlaybooks,
+} from "./alert-email";
 import { unresolvedClickPrefix } from "./failed-clicks";
 import { opsSecret } from "./ingest-auth";
 import type { Bindings } from "./types";
 
 const minute = 60_000;
 const hour = 60 * minute;
-const issueMessages = {
-	click_queue_old:
-		"Clicks have waited in the delivery queue for more than 5 minutes.",
-	click_queue_large:
-		"The click delivery queue exceeds 100 MB or 10,000 messages.",
-	click_queue_unavailable: "The click delivery queue could not be checked.",
-	failed_clicks:
-		"The failed-click queue contains events that need investigation and replay.",
-	failed_queue_unavailable: "The failed-click queue could not be checked.",
-	archived_failed_clicks:
-		"Archived failed clicks still need investigation or verified replay.",
-	failed_archive_unavailable: "The failed-click archive could not be checked.",
-	ingest_health_transport:
-		"The analytics health check could not connect to the service.",
-	ingest_health_http:
-		"The analytics health check returned an unexpected HTTP status.",
-	ingest_health_invalid:
-		"The analytics health check returned an invalid response.",
-	ingest_health_timeout:
-		"The analytics health check did not finish before its deadline.",
-	ingest_not_ready:
-		"The analytics service reports that it is not ready to accept events.",
-	ingest_health_failed:
-		"The analytics service reports an unhealthy state without a named failed component.",
-	ingest_queue_health: "The analytics service cannot read its event queue.",
-	ingest_database_health: "The analytics database check failed.",
-	ingest_writer_health:
-		"The analytics event writer reports a failed or delayed commit.",
-	ingest_archiver_health: "The analytics archive check failed.",
-	ingest_journal_health:
-		"The analytics event journal or its startup replay failed.",
-	ingest_backup_health:
-		"The analytics service reports a database backup failure.",
-	ingest_recovery_health: "The analytics recovery check failed.",
-	ingest_recovery_overdue:
-		"Analytics events have waited too long for recovery.",
-	ingest_recovery_stalled:
-		"The analytics recovery process has stopped making progress.",
-	ingest_recovery_unavailable:
-		"The analytics recovery process has not completed a recent check.",
-	ingest_recovery_records:
-		"Analytics recovery found event records that need investigation.",
-	ingest_recovery_scan_overdue:
-		"The analytics recovery scan of saved events is overdue.",
-	ingest_recovery_error:
-		"The analytics recovery process reports a recent error.",
-	ingest_recovery_scan_error:
-		"The analytics recovery scan of saved events reports a recent error.",
-	ingest_failed_jobs: "The analytics service has failed event jobs.",
-	ingest_queue_large:
-		"The analytics service has more than 1,000 waiting event jobs.",
-	backup_old: "The latest verified database backup is more than 26 hours old.",
-	backup_unavailable:
-		"The latest database backup or its manifest is missing or invalid.",
-	monitor_unavailable:
-		"The link-monitoring service did not pass its readiness check.",
-} as const;
 
-type Issue = keyof typeof issueMessages;
 type OperationsBindings = Pick<
 	Bindings,
 	| "CLICK_EVENTS"
@@ -78,6 +30,7 @@ type OperationsBindings = Pick<
 	| "OPS_ALERT_TO"
 	| "OPS_ALERT_FROM"
 	| "RESEND_API_KEY"
+	| "OPS_ALERT_TIMEZONE"
 >;
 
 function record(value: unknown): Record<string, unknown> {
@@ -130,6 +83,22 @@ export function checkClickQueue(metrics: QueueMetrics, now: number): Issue[] {
 	if (waiting > 10_000 || bytes > 100 * 1024 * 1024)
 		issues.push("click_queue_large");
 	return issues;
+}
+
+/** Plain numbers for the alert email, e.g. "3 clicks are waiting". */
+export function describeClickQueue(metrics: QueueMetrics, now: number): string {
+	const waiting = count(metrics.backlogCount);
+	const bytes = count(metrics.backlogBytes);
+	const oldest = Number(metrics.oldestMessageTimestamp);
+	const size =
+		bytes >= 1024 * 1024
+			? `${(bytes / 1024 / 1024).toFixed(1)} MB`
+			: `${Math.ceil(bytes / 1024)} KB`;
+	const age =
+		oldest > 0
+			? `; the oldest has waited ${describeDuration(now - oldest)}`
+			: "";
+	return `${waiting.toLocaleString("en-US")} click${waiting === 1 ? " is" : "s are"} waiting (${size})${age}.`;
 }
 
 const componentIssues = {
@@ -364,6 +333,7 @@ async function checkIngest(
 async function checkBackup(
 	env: OperationsBindings,
 	now: number,
+	facts: Partial<Record<Issue, string>> = {},
 ): Promise<Issue[]> {
 	const object = await env.ANALYTICS_BACKUPS.get(
 		"snapshots/duckdb/latest.json",
@@ -390,27 +360,209 @@ async function checkBackup(
 	if (!backup || backup.size !== count(manifest.size) || backup.size === 0) {
 		throw new Error("Backup file does not match its manifest");
 	}
-	return now - created > 26 * hour ? ["backup_old"] : [];
+	if (now - created > 26 * hour) {
+		facts.backup_old = `The latest verified backup is ${describeDuration(now - created)} old.`;
+		return ["backup_old"];
+	}
+	return [];
 }
 
-export function buildAlert(issues: Issue[], now: number) {
-	const unique = [...new Set(issues)].sort();
+const defaultLinks: AlertLinks = {
+	analyticsReady: "https://api.ndle.app/health/ready",
+	analyticsDetailedCommand:
+		'curl -s -H "Authorization: Bearer $OPS_SECRET" https://api.ndle.app/health/detailed',
+	analyticsBackupCommand:
+		'curl -s -X POST -H "Authorization: Bearer $OPS_SECRET" https://api.ndle.app/internal/backup',
+	monitorReady: "https://monitor.ndle.app/ready",
+	coolify: "https://coolify.superlinkify.com/",
+	cloudflareQueues: "https://dash.cloudflare.com/?to=/:account/workers/queues",
+	cloudflareR2:
+		"https://dash.cloudflare.com/?to=/:account/r2/default/buckets/ndle-analytics",
+	cloudflareWorker:
+		"https://dash.cloudflare.com/?to=/:account/workers/services/view/ndleworker/production",
+	cloudflareStatus: "https://www.cloudflarestatus.com/",
+};
+
+function alertLinks(env: OperationsBindings): AlertLinks {
+	try {
+		const analytics = new URL(env.INGEST_ENDPOINT).origin;
+		return {
+			...defaultLinks,
+			analyticsReady: `${analytics}/health/ready`,
+			analyticsDetailedCommand: `curl -s -H "Authorization: Bearer $OPS_SECRET" ${analytics}/health/detailed`,
+			analyticsBackupCommand: `curl -s -X POST -H "Authorization: Bearer $OPS_SECRET" ${analytics}/internal/backup`,
+			monitorReady: env.MONITOR_READY_ENDPOINT || defaultLinks.monitorReady,
+		};
+	} catch {
+		return defaultLinks;
+	}
+}
+
+function alertKey(issues: Issue[], now: number): string {
+	// Keep the body stable for a given key: retries and overlapping cron runs
+	// cannot send duplicate mail. Persistent conditions remind at most hourly.
+	return `ndle-operations/${Math.floor(now / hour)}/${[...new Set(issues)].sort().join("-")}`;
+}
+
+export function buildAlert(
+	issues: Issue[],
+	now: number,
+	context: Partial<AlertContext> = {},
+) {
 	return {
-		// Keep the body stable for a given key: retries and overlapping cron runs
-		// cannot send duplicate mail. Persistent conditions remind at most hourly.
-		key: `ndle-operations/${Math.floor(now / hour)}/${unique.join("-")}`,
-		subject: "NDLE needs attention",
-		text: [
-			"NDLE production checks found:",
-			...unique.map((issue) => `- ${issueMessages[issue]}`),
-			"",
-			"Inspect the NDLE Cloudflare queues and Coolify service logs. Preserve failed events; do not delete them to clear an alert.",
-			"https://dash.cloudflare.com/",
-			"https://coolify.superlinkify.com/",
-			"",
-			"Checks run every 5 minutes. An unchanged set of problems sends at most one reminder per hour. Healthy checks do not send email.",
-		].join("\n"),
+		key: alertKey(issues, now),
+		...buildAlertEmail(issues, {
+			now,
+			timeZone: "UTC",
+			links: defaultLinks,
+			facts: {},
+			firstSeen: {},
+			failedClicks: [],
+			...context,
+		}),
 	};
+}
+
+/** Remembers the problems last emailed so a later all-clear can name them. */
+const alertStateKey = "operations/alert-state.json";
+type AlertState = {
+	version: 1;
+	issues: Issue[];
+	firstSeen: Partial<Record<Issue, number>>;
+	alertedAt?: number;
+};
+
+/** Resolves null when no usable state exists; rejects when R2 can't be read. */
+async function readAlertState(
+	env: OperationsBindings,
+): Promise<AlertState | null> {
+	const object = await env.ANALYTICS_BACKUPS.get(alertStateKey);
+	if (!object || object.size > 16_384) return null;
+	try {
+		const value = record(await object.json());
+		if (
+			value.version !== 1 ||
+			!Array.isArray(value.issues) ||
+			!value.issues.every(
+				(issue) => typeof issue === "string" && issue in issuePlaybooks,
+			)
+		)
+			return null;
+		const firstSeen = record(value.firstSeen ?? {});
+		return {
+			version: 1,
+			issues: value.issues as Issue[],
+			firstSeen: Object.fromEntries(
+				Object.entries(firstSeen).filter(
+					([issue, time]) => issue in issuePlaybooks && Number.isFinite(time),
+				),
+			) as AlertState["firstSeen"],
+			alertedAt:
+				typeof value.alertedAt === "number" ? value.alertedAt : undefined,
+		};
+	} catch {
+		return null;
+	}
+}
+
+async function writeAlertState(
+	env: OperationsBindings,
+	state: AlertState | null,
+): Promise<void> {
+	try {
+		await withDeadline(
+			async () =>
+				state
+					? await env.ANALYTICS_BACKUPS.put(
+							alertStateKey,
+							JSON.stringify(state),
+							{ httpMetadata: { contentType: "application/json" } },
+						)
+					: await env.ANALYTICS_BACKUPS.delete(alertStateKey),
+			10_000,
+		);
+	} catch (error) {
+		// Emails still go out; only the all-clear summary may be missed.
+		console.warn(
+			JSON.stringify({
+				message: "NDLE alert state could not be saved",
+				error: error instanceof Error ? error.name : "unknown",
+			}),
+		);
+	}
+}
+
+async function digestText(value: string): Promise<string> {
+	const digest = await crypto.subtle.digest(
+		"SHA-256",
+		new TextEncoder().encode(value),
+	);
+	return [...new Uint8Array(digest)]
+		.slice(0, 8)
+		.map((byte) => byte.toString(16).padStart(2, "0"))
+		.join("");
+}
+
+async function sendEmail(
+	env: OperationsBindings,
+	sendRequest: typeof fetch,
+	idempotencyKey: string,
+	email: { subject: string; text: string; html: string },
+): Promise<string> {
+	// Hash the bounded signature to keep Resend's key under 256 characters.
+	const digest = await crypto.subtle.digest(
+		"SHA-256",
+		new TextEncoder().encode(
+			`${idempotencyKey}/${env.OPS_ALERT_FROM}/${env.OPS_ALERT_TO}`,
+		),
+	);
+	const key = [...new Uint8Array(digest)]
+		.map((value) => value.toString(16).padStart(2, "0"))
+		.join("");
+	const response = await sendRequest("https://api.resend.com/emails", {
+		method: "POST",
+		signal: AbortSignal.timeout(10_000),
+		redirect: "manual",
+		headers: {
+			Authorization: `Bearer ${env.RESEND_API_KEY}`,
+			"Content-Type": "application/json",
+			"Idempotency-Key": `ndle-operations/${key}`,
+		},
+		body: JSON.stringify({
+			from: env.OPS_ALERT_FROM,
+			to: [env.OPS_ALERT_TO],
+			subject: email.subject,
+			text: email.text,
+			html: email.html,
+		}),
+	});
+	const receipt = record(await readJson(response));
+	if (!response.ok || typeof receipt.id !== "string" || !receipt.id) {
+		throw new Error(
+			`NDLE alert email was not accepted (HTTP ${response.status})`,
+		);
+	}
+	return receipt.id;
+}
+
+function describeIngest(evidence: IngestEvidence[]): string {
+	return `${evidence
+		.map((check) => {
+			const path = `/health/${check.endpoint}`;
+			const outcome =
+				check.result === "timeout"
+					? "did not answer within 10 seconds"
+					: check.result === "transport_error"
+						? "could not be reached"
+						: check.result === "invalid_response"
+							? `answered HTTP ${check.http_status} in an unexpected format`
+							: `answered HTTP ${check.http_status}${check.status ? ` (${check.status})` : ""}`;
+			const failing = check.failed_components?.length
+				? `; failing parts: ${check.failed_components.join(", ")}`
+				: "";
+			return `${path} ${outcome}${failing}`;
+		})
+		.join(". ")}.`;
 }
 
 async function withDeadline<T>(
@@ -445,33 +597,61 @@ export async function checkOperations(
 	if (!env.RESEND_API_KEY || !env.OPS_ALERT_FROM || !env.OPS_ALERT_TO) {
 		throw new Error("NDLE alert email is not configured");
 	}
+	// Measured details for the email. Only counts, ages and fixed labels.
+	const facts: Partial<Record<Issue, string>> = {};
+	const failedClicks: FailedClickRef[] = [];
 	const checkSources = [
 		{
 			failure: "click_queue_unavailable",
-			run: async () => checkClickQueue(await env.CLICK_EVENTS.metrics(), now),
+			run: async () => {
+				const metrics = await env.CLICK_EVENTS.metrics();
+				const issues = checkClickQueue(metrics, now);
+				if (issues.length) {
+					const description = describeClickQueue(metrics, now);
+					for (const issue of issues) facts[issue] = description;
+				}
+				return issues;
+			},
 		},
 		{
 			failure: "failed_queue_unavailable",
-			run: async () =>
-				count((await env.CLICK_EVENTS_FAILED.metrics()).backlogCount) > 0
-					? ["failed_clicks"]
-					: [],
+			run: async () => {
+				const waiting = count(
+					(await env.CLICK_EVENTS_FAILED.metrics()).backlogCount,
+				);
+				if (!waiting) return [];
+				facts.failed_clicks = `${waiting.toLocaleString("en-US")} click${waiting === 1 ? " is" : "s are"} in the failed-click queue.`;
+				return ["failed_clicks"];
+			},
 		},
 		{
 			failure: "failed_archive_unavailable",
 			run: async () => {
 				const result = await env.FAILED_CLICK_ARCHIVES.list({
 					prefix: unresolvedClickPrefix,
-					limit: 1,
+					limit: 20,
 				});
 				if (!Array.isArray(result.objects))
 					throw new Error("Failed archive list is invalid");
-				return result.objects.length || result.truncated
-					? ["archived_failed_clicks"]
-					: [];
+				if (!result.objects.length && !result.truncated) return [];
+				for (const object of result.objects.slice(0, 5)) {
+					const [queue, file] = String(object.key)
+						.slice(unresolvedClickPrefix.length)
+						.split("/");
+					if (queue && file?.endsWith(".json"))
+						failedClicks.push({ queue, messageId: file.slice(0, -5) });
+				}
+				const total = result.truncated
+					? `More than ${result.objects.length}`
+					: String(result.objects.length);
+				facts.archived_failed_clicks = `${total} saved failed click${result.objects.length === 1 && !result.truncated ? "" : "s"} still need replaying${failedClicks.length < result.objects.length ? `; the first ${failedClicks.length} are listed below` : ""}.`;
+				return ["archived_failed_clicks"];
 			},
 		},
-		{ failure: "backup_unavailable", run: () => checkBackup(env, now) },
+		{
+			failure: "backup_unavailable",
+			run: () => checkBackup(env, now, facts),
+		},
 		{
 			failure: "monitor_unavailable",
 			run: async () => {
@@ -480,16 +660,24 @@ export async function checkOperations(
 					redirect: "manual",
 				});
 				const status = record(await readJson(response)).status;
-				return response.ok && status === "ready" ? [] : ["monitor_unavailable"];
+				if (response.ok && status === "ready") return [];
+				facts.monitor_unavailable = `The readiness check answered HTTP ${response.status}.`;
+				return ["monitor_unavailable"];
 			},
 		},
 	] satisfies Array<{ failure: Issue; run: () => Promise<Issue[]> }>;
-	const [results, initialIngest] = await Promise.all([
+	const [results, initialIngest, stored] = await Promise.all([
 		Promise.allSettled(
 			checkSources.map((check) => withDeadline(check.run, checkTimeoutMs)),
 		),
 		checkIngest(env, sendRequest, checkTimeoutMs),
+		// A stalled R2 read must not hold back the alert itself.
+		withDeadline(() => readAlertState(env), checkTimeoutMs).then(
+			(state) => ({ available: true as const, state }),
+			() => ({ available: false as const, state: null }),
+		),
 	]);
+	const previous = stored.state;
 	const otherIssues = results.flatMap((result, index) =>
 		result.status === "fulfilled"
 			? result.value
@@ -534,6 +722,9 @@ export async function checkOperations(
 			...ingest.issues,
 		]),
 	];
+	const ingestFact = describeIngest(ingest.evidence as IngestEvidence[]);
+	for (const issue of issues)
+		if (issue.startsWith("ingest_") && !facts[issue]) facts[issue] = ingestFact;
 	console.info(
 		JSON.stringify({
 			message: "NDLE operations checked",
@@ -541,44 +732,78 @@ export async function checkOperations(
 			checked_at: new Date(now).toISOString(),
 		}),
 	);
-	if (!issues.length) return;
-	const alert = buildAlert(issues, now);
-	// Hash the bounded issue signature to keep Resend's key under 256 characters.
-	const digest = await crypto.subtle.digest(
-		"SHA-256",
-		new TextEncoder().encode(
-			`${alert.key}/${env.OPS_ALERT_FROM}/${env.OPS_ALERT_TO}`,
+	const context: AlertContext = {
+		now,
+		timeZone: env.OPS_ALERT_TIMEZONE || "UTC",
+		links: alertLinks(env),
+		facts,
+		firstSeen: Object.fromEntries(
+			issues.map((issue) => [issue, previous?.firstSeen[issue] ?? now]),
 		),
-	);
-	const key = [...new Uint8Array(digest)]
-		.map((value) => value.toString(16).padStart(2, "0"))
-		.join("");
-	const response = await sendRequest("https://api.resend.com/emails", {
-		method: "POST",
-		signal: AbortSignal.timeout(10_000),
-		redirect: "manual",
-		headers: {
-			Authorization: `Bearer ${env.RESEND_API_KEY}`,
-			"Content-Type": "application/json",
-			"Idempotency-Key": `ndle-operations/${key}`,
-		},
-		body: JSON.stringify({
-			from: env.OPS_ALERT_FROM,
-			to: [env.OPS_ALERT_TO],
-			subject: alert.subject,
-			text: alert.text,
-		}),
-	});
-	const receipt = record(await readJson(response));
-	if (!response.ok || typeof receipt.id !== "string" || !receipt.id) {
-		throw new Error(
-			`NDLE alert email was not accepted (HTTP ${response.status})`,
-		);
+		failedClicks,
+	};
+	if (!issues.length) {
+		// Say so once when problems that were emailed have all cleared.
+		if (previous?.alertedAt !== undefined && previous.issues.length) {
+			const id = await sendEmail(
+				env,
+				sendRequest,
+				`all-clear/${previous.alertedAt}/${[...previous.issues].sort().join("-")}`,
+				buildAllClearEmail(previous.issues, {
+					...context,
+					firstSeen: previous.firstSeen,
+				}),
+			);
+			console.info(
+				JSON.stringify({
+					message: "NDLE all-clear email accepted",
+					message_id: id,
+					resolved: previous.issues,
+				}),
+			);
+		}
+		if (previous) await writeAlertState(env, null);
+		return;
 	}
+	const sameProblems =
+		previous !== null &&
+		previous.issues.length === issues.length &&
+		issues.every((issue) => previous.issues.includes(issue));
+	// An unchanged set of problems is repeated at most once an hour.
+	if (
+		sameProblems &&
+		previous.alertedAt !== undefined &&
+		now - previous.alertedAt < hour
+	)
+		return;
+	let email: ReturnType<typeof buildAlertEmail>;
+	let idempotencyKey: string;
+	if (stored.available) {
+		email = buildAlertEmail(issues, context);
+		// Retries of this exact email are sent once; changed numbers are new mail.
+		idempotencyKey = `${alertKey(issues, now)}/${await digestText(email.text)}`;
+	} else {
+		// Without saved state, fall back to an email that stays identical for the
+		// hour so the provider's idempotency key limits reminders to hourly.
+		email = buildAlertEmail(issues, {
+			...context,
+			now: Math.floor(now / hour) * hour,
+			facts: {},
+			firstSeen: {},
+		});
+		idempotencyKey = alertKey(issues, now);
+	}
+	const id = await sendEmail(env, sendRequest, idempotencyKey, email);
+	await writeAlertState(env, {
+		version: 1,
+		issues,
+		firstSeen: context.firstSeen,
+		alertedAt: now,
+	});
 	console.info(
 		JSON.stringify({
 			message: "NDLE alert email accepted",
-			message_id: receipt.id,
+			message_id: id,
 			issues,
 		}),
 	);
