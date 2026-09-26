@@ -23,14 +23,16 @@ type RedirectDecision =
 			reason: RedirectBlockReason | "invalid destination";
 	  };
 
+// A visitor (network and browser) keeps the same variant of a link, and each
+// link splits visitors independently of every other link's test.
 async function buildVariantSessionId(
+	linkId: string,
 	readHeader: HeaderReader,
 ): Promise<string> {
 	const userAgent = readHeader("user-agent") ?? "";
 	const ip =
 		readHeader("cf-connecting-ip") ?? readHeader("x-forwarded-for") ?? "";
-	const ipHash = await sha256Hex(ip);
-	return `${ipHash}-${userAgent}`.substring(0, 32);
+	return sha256Hex(`${linkId}\n${ip}\n${userAgent}`);
 }
 
 async function decideRedirect(params: {
@@ -59,7 +61,10 @@ async function decideRedirect(params: {
 	const abConfig = redisValue?.rules?.ab_test;
 
 	if (abConfig?.enabled && abConfig.variants?.length) {
-		const sessionId = await buildVariantSessionId(readHeader);
+		const sessionId = await buildVariantSessionId(
+			redisValue?.link_id ?? "",
+			readHeader,
+		);
 		const result = resolveABTest(abConfig, sessionId);
 		if (result) {
 			try {

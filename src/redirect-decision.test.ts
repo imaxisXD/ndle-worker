@@ -133,3 +133,76 @@ test("falls back when an A/B variant is unsafe", async () => {
 		assert.equal(decision.variantId, null);
 	}
 });
+
+const splitTest = (linkId: string): RedisValueObject => ({
+	...activeLink,
+	link_id: linkId,
+	rules: {
+		ab_test: {
+			enabled: true,
+			distribution: "deterministic",
+			variants: [
+				{ id: "control", url: "https://control.example", weight: 50 },
+				{ id: "variant_a", url: "https://variant.example", weight: 50 },
+			],
+		},
+	},
+});
+
+async function assignedVariant(
+	link: RedisValueObject,
+	ip: string,
+	userAgent: string,
+): Promise<string | null> {
+	const decision = await decideRedirect({
+		redisValue: link,
+		readHeader: (name) =>
+			name === "cf-connecting-ip"
+				? ip
+				: name === "user-agent"
+					? userAgent
+					: undefined,
+	});
+	return decision.kind === "redirect" ? decision.variantId : null;
+}
+
+test("a visitor keeps the same A/B variant on repeat clicks", async () => {
+	const link = splitTest("link_sticky");
+	const first = await assignedVariant(link, "203.0.113.7", "agent-1");
+	for (let click = 0; click < 5; click++) {
+		assert.equal(
+			await assignedVariant(link, "203.0.113.7", "agent-1"),
+			first,
+		);
+	}
+});
+
+test("visitors sharing one network are split across A/B variants", async () => {
+	const link = splitTest("link_office");
+	let control = 0;
+	for (let visitor = 0; visitor < 400; visitor++) {
+		const variant = await assignedVariant(
+			link,
+			"198.51.100.20",
+			`Mozilla/5.0 browser-${visitor}`,
+		);
+		if (variant === "control") control++;
+	}
+	assert.ok(control > 150 && control < 250, `control got ${control} of 400`);
+});
+
+test("each link splits the same visitors independently", async () => {
+	const first = splitTest("link_first");
+	const second = splitTest("link_second");
+	let differs = 0;
+	for (let visitor = 0; visitor < 400; visitor++) {
+		const ip = `192.0.2.${visitor % 250}`;
+		const userAgent = `agent-${visitor}`;
+		if (
+			(await assignedVariant(first, ip, userAgent)) !==
+			(await assignedVariant(second, ip, userAgent))
+		)
+			differs++;
+	}
+	assert.ok(differs > 150 && differs < 250, `${differs} of 400 differ`);
+});
