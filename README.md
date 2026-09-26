@@ -6,7 +6,7 @@ returns a 302 with browser caching disabled. Analytics never decides whether a
 visitor reaches the destination:
 
 - The link lookup is the only failure that answers 503. It has one quick retry
-  and a one-second timeout per attempt.
+  and a three-second timeout per attempt.
 - A tracked redirect normally waits for Cloudflare Queues to accept its event,
   for at most 1.5 s. If the queue fails or is slow, the visitor is redirected
   anyway and the event is kept after the response: two delayed sends (same

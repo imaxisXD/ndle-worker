@@ -5,12 +5,14 @@ import type { Bindings, QueuedClick } from "./types";
 
 type Logger = ReturnType<typeof createLogger>;
 
-// Visitors wait on the link lookup, so a slow store must fail within about a
-// second instead of the client's default ~4 s of retries without a timeout.
+// Visitors wait on the link lookup, so bound it instead of the client's
+// default retries without a timeout. A first request from a new isolate can
+// need well over a second to open its connection, so allow 3 s per attempt;
+// a 1 s limit turned some of those into 503s.
 export function linkStore(env: Bindings): Redis {
 	return Redis.fromEnv(env, {
 		retry: { retries: 1, backoff: () => 50 },
-		signal: () => AbortSignal.timeout(1_000),
+		signal: () => AbortSignal.timeout(3_000),
 	});
 }
 
