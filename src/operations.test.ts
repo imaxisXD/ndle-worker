@@ -298,7 +298,7 @@ test("an all-clear email names the problems that were fixed", async () => {
 	expect(emails).toHaveLength(2);
 });
 
-test("expired backups and failed metric reads produce actionable alerts", async () => {
+test("expired backups alert at once while a failed metric read waits", async () => {
 	const env = environment();
 	env.CLICK_EVENTS.metrics = async () => {
 		throw new Error("Queue request failed");
@@ -324,7 +324,134 @@ test("expired backups and failed metric reads produce actionable alerts", async 
 	});
 	await checkOperations(env, now, fetch, 12_000, skipWait);
 	expect(text).toContain("more than a day old");
-	expect(text).toContain("Could not read the click queue's status");
+	expect(text).not.toContain("Could not read the click queue's status");
+});
+
+/** Healthy services apart from an optional monitoring outage. */
+function captureAlerts(service = { monitorReady: true }) {
+	const emails: Array<{ subject: string; text: string }> = [];
+	spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
+		const url = String(input);
+		if (url.includes("resend.com")) {
+			emails.push(JSON.parse(String(init?.body)));
+			return Response.json({ id: "accepted" });
+		}
+		if (url.includes("/health/detailed")) return Response.json(healthy);
+		if (url.includes("monitor.") && !service.monitorReady)
+			return Response.json({ status: "not_ready" }, { status: 503 });
+		return Response.json({ status: "ready" });
+	});
+	return emails;
+}
+
+/** A click queue whose metrics fail like Cloudflare's until made readable. */
+function unreadableClickQueue(env: Bindings) {
+	const queue = { readable: false };
+	env.CLICK_EVENTS.metrics = async () => {
+		if (queue.readable) return empty;
+		throw new Error("Unknown Internal Error (15000)");
+	};
+	return queue;
+}
+
+function runAt(env: Bindings, minutes: number) {
+	return checkOperations(env, now + minutes * 60_000, fetch, 12_000, skipWait);
+}
+
+test("a brief failure to read the click queue is logged but sends no email or all-clear", async () => {
+	const env = environment();
+	const state = withAlertState(env);
+	const emails = captureAlerts();
+	const warn = spyOn(console, "warn");
+	const queue = unreadableClickQueue(env);
+	for (const minutes of [0, 5, 10, 25]) await runAt(env, minutes);
+	expect(emails).toHaveLength(0);
+	expect(state.has("operations/alert-state.json")).toBe(true);
+	// Only the error name and Cloudflare's code are logged, not its message.
+	expect(warn).toHaveBeenCalledWith(
+		JSON.stringify({
+			message: "NDLE operations check failed",
+			check: "click_queue_unavailable",
+			error: "Error",
+			cloudflare_code: "15000",
+		}),
+	);
+	queue.readable = true;
+	await runAt(env, 30);
+	expect(emails).toHaveLength(0);
+	expect(state.has("operations/alert-state.json")).toBe(false);
+	// A later failure starts the 30 minutes again.
+	queue.readable = false;
+	for (const minutes of [35, 60]) await runAt(env, minutes);
+	expect(emails).toHaveLength(0);
+});
+
+test("a click queue read failure lasting 30 minutes is emailed once, then cleared", async () => {
+	const env = environment();
+	withAlertState(env);
+	const emails = captureAlerts();
+	const queue = unreadableClickQueue(env);
+	for (const minutes of [0, 5, 10, 15, 20, 25]) await runAt(env, minutes);
+	expect(emails).toHaveLength(0);
+	await runAt(env, 30);
+	await runAt(env, 35);
+	expect(emails).toHaveLength(1);
+	expect(emails[0].subject).toBe(
+		"[NDLE] Needs attention: Could not read the click queue's status",
+	);
+	expect(emails[0].text).toContain("Going on since");
+	expect(emails[0].text).toContain("about 30 minutes");
+	expect(emails[0].text).toContain('search for "NDLE operations check failed"');
+	queue.readable = true;
+	await runAt(env, 40);
+	expect(emails).toHaveLength(2);
+	expect(emails[1].subject).toBe(
+		"[NDLE] All clear: everything is working again",
+	);
+	expect(emails[1].text).toContain(
+		"Clicks: Could not read the click queue's status",
+	);
+	expect(emails[1].text).toContain("lasted about 40 minutes");
+});
+
+test("a waiting read failure keeps its start time while another problem is emailed", async () => {
+	const env = environment();
+	withAlertState(env);
+	const emails = captureAlerts({ monitorReady: false });
+	const queue = unreadableClickQueue(env);
+	queue.readable = true;
+	await runAt(env, 0);
+	expect(emails).toHaveLength(1);
+	queue.readable = false;
+	for (const minutes of [5, 10, 15, 20, 25, 30]) await runAt(env, minutes);
+	expect(emails).toHaveLength(1);
+	await runAt(env, 35);
+	expect(emails).toHaveLength(2);
+	expect(emails[1].subject).toBe(
+		"[NDLE] Needs attention: Could not read the click queue's status (+1 more)",
+	);
+});
+
+test("an all-clear waits until a brief read failure passes too", async () => {
+	const env = environment();
+	withAlertState(env);
+	const service = { monitorReady: false };
+	const emails = captureAlerts(service);
+	const queue = unreadableClickQueue(env);
+	queue.readable = true;
+	await runAt(env, 0);
+	expect(emails).toHaveLength(1);
+	service.monitorReady = true;
+	queue.readable = false;
+	await runAt(env, 5);
+	expect(emails).toHaveLength(1);
+	queue.readable = true;
+	await runAt(env, 10);
+	expect(emails).toHaveLength(2);
+	expect(emails[1].text).toContain(
+		"Link monitoring: Link monitoring is not running",
+	);
+	expect(emails[1].text).not.toContain("click queue");
 });
 
 test("provider rejection fails the run instead of claiming email delivery", async () => {
@@ -403,7 +530,8 @@ test("stalled native bindings cannot suppress a known failed-event alert", async
 		);
 	});
 	await checkOperations(env, now, fetch, 10);
-	expect(text).toContain("Could not read the click queue's status");
+	// Without readable saved state, the stalled read can't be timed, so it waits.
+	expect(text).not.toContain("Could not read the click queue's status");
 	expect(text).toContain(
 		"Some clicks could not be delivered and were set aside",
 	);

@@ -1,6 +1,7 @@
 import {
 	type AlertContext,
 	type AlertLinks,
+	alertAfter,
 	buildAlertEmail,
 	buildAllClearEmail,
 	describeDuration,
@@ -465,6 +466,17 @@ async function readAlertState(
 	}
 }
 
+function sameFirstSeen(
+	previous: AlertState | null,
+	firstSeen: AlertState["firstSeen"],
+): boolean {
+	const before = Object.entries(previous?.firstSeen ?? {});
+	return (
+		before.length === Object.keys(firstSeen).length &&
+		before.every(([issue, time]) => firstSeen[issue as Issue] === time)
+	);
+}
+
 async function writeAlertState(
 	env: OperationsBindings,
 	state: AlertState | null,
@@ -574,10 +586,11 @@ async function withDeadline<T>(
 		return await Promise.race([
 			Promise.resolve().then(check),
 			new Promise<never>((_resolve, reject) => {
-				timer = setTimeout(
-					() => reject(new Error("The operations check timed out")),
-					timeoutMs,
-				);
+				timer = setTimeout(() => {
+					const error = new Error("The operations check timed out");
+					error.name = "TimeoutError";
+					reject(error);
+				}, timeoutMs);
 			}),
 		]);
 	} finally {
@@ -678,11 +691,22 @@ export async function checkOperations(
 		),
 	]);
 	const previous = stored.state;
-	const otherIssues = results.flatMap((result, index) =>
-		result.status === "fulfilled"
-			? result.value
-			: [checkSources[index].failure],
-	);
+	const otherIssues = results.flatMap((result, index) => {
+		if (result.status === "fulfilled") return result.value;
+		const failure = checkSources[index].failure;
+		const error = result.reason instanceof Error ? result.reason : undefined;
+		// Cloudflare binding errors end in a numeric code, e.g. "(15000)". Log
+		// only that code and the error name, never the message text.
+		console.warn(
+			JSON.stringify({
+				message: "NDLE operations check failed",
+				check: failure,
+				error: error?.name ?? "unknown",
+				cloudflare_code: error?.message.match(/\((\d{3,6})\)$/)?.[1],
+			}),
+		);
+		return [failure];
+	});
 	const confirmationNeeded = initialIngest.issues.some(needsHealthConfirmation);
 	console.info(
 		JSON.stringify({
@@ -742,6 +766,29 @@ export async function checkOperations(
 		),
 		failedClicks,
 	};
+	// A problem with a wait, such as a failed read of Cloudflare's status, is
+	// emailed only once it has lasted that long. It needs saved state to tell.
+	const due = issues.filter((issue) => {
+		const wait = alertAfter(issue);
+		return (
+			!wait ||
+			(stored.available && now - (context.firstSeen[issue] ?? now) >= wait)
+		);
+	});
+	// Keeps the emailed problems while remembering when waiting ones began.
+	const waiting: AlertState = {
+		version: 1,
+		issues: previous?.issues ?? [],
+		firstSeen: context.firstSeen,
+		alertedAt: previous?.alertedAt,
+	};
+	if (issues.length && !due.length) {
+		// Nothing to send yet. Any all-clear waits until these pass too. An
+		// unreadable state is left alone so its emailed problems aren't lost.
+		if (stored.available && !sameFirstSeen(previous, waiting.firstSeen))
+			await writeAlertState(env, waiting);
+		return;
+	}
 	if (!issues.length) {
 		// Say so once when problems that were emailed have all cleared.
 		if (previous?.alertedAt !== undefined && previous.issues.length) {
@@ -767,36 +814,39 @@ export async function checkOperations(
 	}
 	const sameProblems =
 		previous !== null &&
-		previous.issues.length === issues.length &&
-		issues.every((issue) => previous.issues.includes(issue));
+		previous.issues.length === due.length &&
+		due.every((issue) => previous.issues.includes(issue));
 	// An unchanged set of problems is repeated at most once an hour.
 	if (
 		sameProblems &&
 		previous.alertedAt !== undefined &&
 		now - previous.alertedAt < hour
-	)
+	) {
+		if (!sameFirstSeen(previous, waiting.firstSeen))
+			await writeAlertState(env, waiting);
 		return;
+	}
 	let email: ReturnType<typeof buildAlertEmail>;
 	let idempotencyKey: string;
 	if (stored.available) {
-		email = buildAlertEmail(issues, context);
+		email = buildAlertEmail(due, context);
 		// Retries of this exact email are sent once; changed numbers are new mail.
-		idempotencyKey = `${alertKey(issues, now)}/${await digestText(email.text)}`;
+		idempotencyKey = `${alertKey(due, now)}/${await digestText(email.text)}`;
 	} else {
 		// Without saved state, fall back to an email that stays identical for the
 		// hour so the provider's idempotency key limits reminders to hourly.
-		email = buildAlertEmail(issues, {
+		email = buildAlertEmail(due, {
 			...context,
 			now: Math.floor(now / hour) * hour,
 			facts: {},
 			firstSeen: {},
 		});
-		idempotencyKey = alertKey(issues, now);
+		idempotencyKey = alertKey(due, now);
 	}
 	const id = await sendEmail(env, sendRequest, idempotencyKey, email);
 	await writeAlertState(env, {
 		version: 1,
-		issues,
+		issues: due,
 		firstSeen: context.firstSeen,
 		alertedAt: now,
 	});
@@ -804,7 +854,7 @@ export async function checkOperations(
 		JSON.stringify({
 			message: "NDLE alert email accepted",
 			message_id: id,
-			issues,
+			issues: due,
 		}),
 	);
 }

@@ -42,12 +42,18 @@ type Playbook = {
 	fixed: string;
 	/** Shown when this problem often clears by itself, e.g. after a deploy. */
 	selfHeals?: string;
+	/** Emailed only once the problem has lasted this long; shorter spells are logged. */
+	alertAfter?: number;
 };
 
 const clearsItself =
 	"This often happens for a few minutes after deploying the redirect Worker or restarting the analytics service. If an all-clear email arrives within about 10 minutes, nothing needs doing.";
 const nextCheck =
 	"The next check, within 5 minutes, sends an all-clear email once this passes.";
+/** Cloudflare's status reads fail for a few minutes now and then and recover. */
+const readFailureWait = 30 * 60_000;
+const readFailureNote =
+	"Shorter read failures happen now and then and are not emailed.";
 
 function analyticsSteps(links: AlertLinks, extra: string[] = []): string[] {
 	return [
@@ -106,14 +112,13 @@ export const issuePlaybooks = {
 		area: "Clicks",
 		title: "Could not read the click queue's status",
 		urgency: "soon",
-		meaning:
-			"The check could not get the delivery queue's numbers from Cloudflare. On its own this says nothing is wrong with your clicks; it is usually a brief Cloudflare hiccup.",
+		meaning: `For at least ${describeDuration(readFailureWait)} the check could not get the delivery queue's numbers from Cloudflare, so it can't tell whether clicks are waiting. ${readFailureNote}`,
 		lost: "No sign of it. Clicks keep flowing independently of this check.",
-		selfHeals:
-			"Usually clears by the next check. If an all-clear email arrives, nothing needs doing.",
+		alertAfter: readFailureWait,
 		steps: ({ links }) => [
-			`If this repeats for 30 minutes, check ${links.cloudflareStatus} for a Queues incident.`,
+			`Check ${links.cloudflareStatus} for a Queues incident.`,
 			`Open Cloudflare → Queues → ndle-click-events (${links.cloudflareQueues}) and confirm the page loads and the Backlog is low.`,
+			`To see Cloudflare's error code, open the redirect Worker's logs (${links.cloudflareWorker} → Logs) and search for "NDLE operations check failed".`,
 		],
 		fixed: nextCheck,
 	},
@@ -134,14 +139,13 @@ export const issuePlaybooks = {
 		area: "Failed clicks",
 		title: "Could not read the failed-click queue's status",
 		urgency: "soon",
-		meaning:
-			"The check could not get the failed-click queue's numbers from Cloudflare. On its own this does not mean any click failed; it is usually a brief Cloudflare hiccup.",
+		meaning: `For at least ${describeDuration(readFailureWait)} the check could not get the failed-click queue's numbers from Cloudflare. On its own this does not mean any click failed. ${readFailureNote}`,
 		lost: "No sign of it.",
-		selfHeals:
-			"Usually clears by the next check. If an all-clear email arrives, nothing needs doing.",
+		alertAfter: readFailureWait,
 		steps: ({ links }) => [
-			`If this repeats for 30 minutes, check ${links.cloudflareStatus} for a Queues incident.`,
+			`Check ${links.cloudflareStatus} for a Queues incident.`,
 			`Open Cloudflare → Queues → ndle-click-events-failed (${links.cloudflareQueues}) and confirm its Backlog is 0.`,
+			`To see Cloudflare's error code, open the redirect Worker's logs (${links.cloudflareWorker} → Logs) and search for "NDLE operations check failed".`,
 		],
 		fixed: nextCheck,
 	},
@@ -173,13 +177,11 @@ export const issuePlaybooks = {
 		area: "Failed clicks",
 		title: "Could not check the saved failed clicks in R2",
 		urgency: "soon",
-		meaning:
-			"The check could not list the failed-click records in the R2 bucket. This is usually a brief Cloudflare R2 hiccup.",
+		meaning: `For at least ${describeDuration(readFailureWait)} the check could not list the failed-click records in the R2 bucket. ${readFailureNote}`,
 		lost: "No sign of it.",
-		selfHeals:
-			"Usually clears by the next check. If an all-clear email arrives, nothing needs doing.",
+		alertAfter: readFailureWait,
 		steps: ({ links }) => [
-			`If this repeats for 30 minutes, check ${links.cloudflareStatus} for an R2 incident.`,
+			`Check ${links.cloudflareStatus} for an R2 incident.`,
 			`Open the ndle-analytics bucket (${links.cloudflareR2}) and confirm it loads.`,
 		],
 		fixed: nextCheck,
@@ -409,6 +411,12 @@ export const issuePlaybooks = {
 } satisfies Record<string, Playbook>;
 
 export type Issue = keyof typeof issuePlaybooks;
+
+/** How long a problem must last before it is emailed; 0 sends it at once. */
+export function alertAfter(issue: Issue): number {
+	const playbook: Playbook = issuePlaybooks[issue];
+	return playbook.alertAfter ?? 0;
+}
 
 function formatTime(instant: number, timeZone: string): string {
 	const local = new Intl.DateTimeFormat(

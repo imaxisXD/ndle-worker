@@ -239,6 +239,9 @@ status, invalid response, timeout, or a service-reported failure. Known componen
 and recovery reason codes identify database, queue, writer, backup, archive,
 journal and recovery problems. Logs include only fixed status, component and reason
 fields; raw exception text, event bodies, owner data and credentials are omitted.
+A check that throws or stalls logs "NDLE operations check failed" with the
+check, the error name (`TimeoutError` for a stall) and, for Cloudflare binding
+errors, only their numeric code.
 
 An ingest health failure is checked once more after 15 seconds before sending
 one combined email. A healthy second sample clears that temporary health alert.
@@ -260,9 +263,14 @@ Healthy checks send no email. The last emailed problems are saved in
 `operations/alert-state.json` in the analytics bucket: an unchanged set is
 repeated at most once an hour (with how long it has lasted), a changed set is
 sent at once, and when every check passes again one all-clear email names what
-was fixed. Each email's provider idempotency key includes a hash of its body, so
-retries of the same email are sent once. If the saved state cannot be read, the
-email drops its changing numbers and uses an hourly key so reminders stay hourly.
+was fixed. Failures to read Cloudflare's own status (click queue, failed-click
+queue and failed-click archive) come and go for a few minutes at a time, so they
+are emailed only after lasting 30 minutes; shorter spells are logged, saved with
+their start time and send neither an alert nor an all-clear. An all-clear also
+waits until any such spell passes. Each email's provider idempotency key
+includes a hash of its body, so retries of the same email are sent once. If the
+saved state cannot be read, the email drops its changing numbers and uses an
+hourly key so reminders stay hourly.
 Provider rejection fails the scheduled run and is logged; acceptance is not proof
 that the recipient read the message. Observe Cron executions and provider
 delivery status after deployment. A failure of the alert provider or Cloudflare
