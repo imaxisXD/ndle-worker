@@ -170,10 +170,7 @@ test("a visitor keeps the same A/B variant on repeat clicks", async () => {
 	const link = splitTest("link_sticky");
 	const first = await assignedVariant(link, "203.0.113.7", "agent-1");
 	for (let click = 0; click < 5; click++) {
-		assert.equal(
-			await assignedVariant(link, "203.0.113.7", "agent-1"),
-			first,
-		);
+		assert.equal(await assignedVariant(link, "203.0.113.7", "agent-1"), first);
 	}
 });
 
