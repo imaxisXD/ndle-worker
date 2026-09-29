@@ -42,7 +42,7 @@ type Playbook = {
 	fixed: string;
 	/** Shown when this problem often clears by itself, e.g. after a deploy. */
 	selfHeals?: string;
-	/** Emailed only once the problem has lasted this long; shorter spells are logged. */
+	/** Emailed only once the problem has lasted this long; by default, until the next check. */
 	alertAfter?: number;
 };
 
@@ -50,10 +50,12 @@ const clearsItself =
 	"This often happens for a few minutes after deploying the redirect Worker or restarting the analytics service. If an all-clear email arrives within about 10 minutes, nothing needs doing.";
 const nextCheck =
 	"The next check, within 5 minutes, sends an all-clear email once this passes.";
-/** Cloudflare's status reads fail for a few minutes now and then and recover. */
-const readFailureWait = 30 * 60_000;
-const readFailureNote =
-	"Shorter read failures happen now and then and are not emailed.";
+/** Checks run 5 minutes apart; the slack allows for Cloudflare's timing. */
+const nextCheckWait = 4 * 60_000;
+/** Link monitoring can be slow for a moment without being down. */
+const monitorWait = 30 * 60_000;
+/** The checker got no answer, which alone says nothing is broken: logged only. */
+const logOnly = Number.POSITIVE_INFINITY;
 
 function analyticsSteps(links: AlertLinks, extra: string[] = []): string[] {
 	return [
@@ -112,9 +114,10 @@ export const issuePlaybooks = {
 		area: "Clicks",
 		title: "Could not read the click queue's status",
 		urgency: "soon",
-		meaning: `For at least ${describeDuration(readFailureWait)} the check could not get the delivery queue's numbers from Cloudflare, so it can't tell whether clicks are waiting. ${readFailureNote}`,
+		meaning:
+			"The check could not get the delivery queue's numbers from Cloudflare, so it can't tell whether clicks are waiting.",
 		lost: "No sign of it. Clicks keep flowing independently of this check.",
-		alertAfter: readFailureWait,
+		alertAfter: logOnly,
 		steps: ({ links }) => [
 			`Check ${links.cloudflareStatus} for a Queues incident.`,
 			`Open Cloudflare → Queues → ndle-click-events (${links.cloudflareQueues}) and confirm the page loads and the Backlog is low.`,
@@ -139,9 +142,10 @@ export const issuePlaybooks = {
 		area: "Failed clicks",
 		title: "Could not read the failed-click queue's status",
 		urgency: "soon",
-		meaning: `For at least ${describeDuration(readFailureWait)} the check could not get the failed-click queue's numbers from Cloudflare. On its own this does not mean any click failed. ${readFailureNote}`,
+		meaning:
+			"The check could not get the failed-click queue's numbers from Cloudflare. On its own this does not mean any click failed.",
 		lost: "No sign of it.",
-		alertAfter: readFailureWait,
+		alertAfter: logOnly,
 		steps: ({ links }) => [
 			`Check ${links.cloudflareStatus} for a Queues incident.`,
 			`Open Cloudflare → Queues → ndle-click-events-failed (${links.cloudflareQueues}) and confirm its Backlog is 0.`,
@@ -177,9 +181,10 @@ export const issuePlaybooks = {
 		area: "Failed clicks",
 		title: "Could not check the saved failed clicks in R2",
 		urgency: "soon",
-		meaning: `For at least ${describeDuration(readFailureWait)} the check could not list the failed-click records in the R2 bucket. ${readFailureNote}`,
+		meaning:
+			"The check could not list the failed-click records in the R2 bucket.",
 		lost: "No sign of it.",
-		alertAfter: readFailureWait,
+		alertAfter: logOnly,
 		steps: ({ links }) => [
 			`Check ${links.cloudflareStatus} for an R2 incident.`,
 			`Open the ndle-analytics bucket (${links.cloudflareR2}) and confirm it loads.`,
@@ -399,9 +404,9 @@ export const issuePlaybooks = {
 		area: "Link monitoring",
 		title: "Link monitoring is not running",
 		urgency: "soon",
-		meaning:
-			"The service that checks whether your links' destinations are up is not ready, so link-health results are paused. Redirects and analytics are not affected.",
+		meaning: `For at least ${describeDuration(monitorWait)} the service that checks whether your links' destinations are up has not been ready, so link-health results are paused. Redirects and analytics are not affected.`,
 		lost: "No clicks are affected. Health checks simply resume once it's back.",
+		alertAfter: monitorWait,
 		steps: ({ links }) => [
 			`Open ${links.monitorReady}. A healthy service shows {"status":"ready"}.`,
 			`Open Coolify (${links.coolify}) → ndle-link-monitoring. If it isn't Running (healthy), open Logs, check its Postgres and Redis are running, then press Redeploy.`,
@@ -412,10 +417,10 @@ export const issuePlaybooks = {
 
 export type Issue = keyof typeof issuePlaybooks;
 
-/** How long a problem must last before it is emailed; 0 sends it at once. */
+/** How long a problem must last before it is emailed; Infinity never emails it. */
 export function alertAfter(issue: Issue): number {
 	const playbook: Playbook = issuePlaybooks[issue];
-	return playbook.alertAfter ?? 0;
+	return playbook.alertAfter ?? nextCheckWait;
 }
 
 function formatTime(instant: number, timeZone: string): string {
@@ -483,7 +488,7 @@ const urgencyLabel: Record<Urgency, string> = {
 };
 
 const footer =
-	"Checks run every 5 minutes. If the same problems continue you get a reminder at most once an hour, and an all-clear email when everything passes again.";
+	"Checks run every 5 minutes, and a problem is emailed only if the next check still finds it. If the same problems continue you get a reminder at most once an hour, and an all-clear email when everything passes again.";
 
 function escapeHtml(value: string): string {
 	return value

@@ -247,9 +247,8 @@ An ingest health failure is checked once more after 15 seconds before sending
 one combined email. A healthy second sample clears that temporary health alert.
 Initial failed-job counts, recovery records needing investigation, queue,
 unresolved archive, backup and monitoring issues are always retained. When ingest
-health is healthy, those other alerts send without the confirmation delay. Both health samples are logged, including
-failures that recover. This adds no notification database or cross-run state;
-the next five-minute check remains independent.
+health is healthy, those other alerts send without the confirmation delay. Both
+health samples are logged, including failures that recover.
 
 Each email is written for a person, not a log reader (`src/alert-email.ts`).
 Every problem says what was measured (counts and ages only), what it means for
@@ -263,11 +262,17 @@ Healthy checks send no email. The last emailed problems are saved in
 `operations/alert-state.json` in the analytics bucket: an unchanged set is
 repeated at most once an hour (with how long it has lasted), a changed set is
 sent at once, and when every check passes again one all-clear email names what
-was fixed. Failures to read Cloudflare's own status (click queue, failed-click
-queue and failed-click archive) come and go for a few minutes at a time, so they
-are emailed only after lasting 30 minutes; shorter spells are logged, saved with
-their start time and send neither an alert nor an all-clear. An all-clear also
-waits until any such spell passes. Each email's provider idempotency key
+was fixed.
+
+Only real failures are emailed, and only once they last. The same file keeps
+when each problem was first seen, so a problem is emailed only if a check at
+least 4 minutes later (normally the next one) still finds it; link monitoring
+must be down for 30 minutes. A blip that clears by then sends neither an alert
+nor an all-clear. A check that gets no answer from Cloudflare (click queue,
+failed-click queue or failed-click archive) says nothing is broken, so it is only
+logged, however long it lasts; while it lasts an all-clear waits, because the
+queue can't be judged healthy. If the saved state can't be read, nothing can be
+timed and real problems email at once. Each email's provider idempotency key
 includes a hash of its body, so retries of the same email are sent once. If the
 saved state cannot be read, the email drops its changing numbers and uses an
 hourly key so reminders stay hourly.

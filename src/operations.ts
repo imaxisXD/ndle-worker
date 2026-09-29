@@ -766,14 +766,14 @@ export async function checkOperations(
 		),
 		failedClicks,
 	};
-	// A problem with a wait, such as a failed read of Cloudflare's status, is
-	// emailed only once it has lasted that long. It needs saved state to tell.
+	// A problem is emailed only once it has lasted its wait, so a blip the next
+	// check no longer sees sends nothing. A check that got no answer is only
+	// logged. Without saved state nothing can be timed, so real problems send
+	// at once and the hourly key keeps them hourly.
 	const due = issues.filter((issue) => {
 		const wait = alertAfter(issue);
-		return (
-			!wait ||
-			(stored.available && now - (context.firstSeen[issue] ?? now) >= wait)
-		);
+		if (!Number.isFinite(wait)) return false;
+		return !stored.available || now - (context.firstSeen[issue] ?? now) >= wait;
 	});
 	// Keeps the emailed problems while remembering when waiting ones began.
 	const waiting: AlertState = {

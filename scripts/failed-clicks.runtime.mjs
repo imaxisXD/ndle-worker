@@ -66,6 +66,9 @@ const wrapper = `
 import { consumeQueue } from ${JSON.stringify(resolve(project, "src/queue-handler.ts"))};
 import { replayFailedClick, resolveFailedClick, resolveInvalidFailedClick } from ${JSON.stringify(resolve(project, "src/failed-click-recovery.ts"))};
 import { checkOperations } from ${JSON.stringify(resolve(project, "src/operations.ts"))};
+import { issuePlaybooks } from ${JSON.stringify(resolve(project, "src/alert-email.ts"))};
+// Saved alert state in which every problem was first seen an hour earlier, so one run emails.
+const seenAnHourAgo = { version: 1, issues: [], firstSeen: Object.fromEntries(Object.keys(issuePlaybooks).map(issue => [issue, Date.parse("2026-09-05T17:05:00Z")])) };
 export default { async fetch(request, bindings) {
   const args = await request.json();
   const storage = bindings.FAILED_CLICK_ARCHIVES;
@@ -95,7 +98,7 @@ export default { async fetch(request, bindings) {
     INGEST_ENDPOINT: "https://ingest.example.test/ingest", API_SECRET: "FAKE-ingest-secret", LOG_LEVEL: "silent",
     MONITOR_READY_ENDPOINT: "https://monitor.example.test/ready", OPS_ALERTS_ENABLED: "true",
     OPS_ALERT_FROM: "NDLE <alerts@example.test>", OPS_ALERT_TO: "owner@example.test", RESEND_API_KEY: "FAKE-email-key",
-    ANALYTICS_BACKUPS: { get: async () => ({ size: 300, json: async () => ({ version: 3, key: "snapshots/duckdb/fixture/analytics.duckdb", size: 1024, sha256: "a".repeat(64), createdAt: "2026-09-05T18:00:00.000Z" }) }), head: async () => ({ size: 1024 }) }
+    ANALYTICS_BACKUPS: { get: async key => key === "operations/alert-state.json" ? { size: 300, json: async () => seenAnHourAgo } : ({ size: 300, json: async () => ({ version: 3, key: "snapshots/duckdb/fixture/analytics.duckdb", size: 1024, sha256: "a".repeat(64), createdAt: "2026-09-05T18:00:00.000Z" }) }), head: async () => ({ size: 1024 }) }
   };
   const operationsFetch = async (input, init) => {
     if (args.healthNetworkFailure && new URL(input).pathname === "/health/detailed") throw new Error("Injected connection failure");

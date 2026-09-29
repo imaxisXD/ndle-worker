@@ -1,4 +1,5 @@
 import { afterEach, expect, mock, spyOn, test } from "bun:test";
+import { issuePlaybooks } from "./alert-email";
 import {
 	buildAlert,
 	checkClickQueue,
@@ -31,6 +32,16 @@ const healthy = {
 
 const skipWait = async (_delayMs: number) => {};
 
+const alertStateKey = "operations/alert-state.json";
+/** Saved state in which every problem was first seen an hour ago, so one run emails. */
+const seenAnHourAgo = {
+	version: 1,
+	issues: [],
+	firstSeen: Object.fromEntries(
+		Object.keys(issuePlaybooks).map((issue) => [issue, now - 60 * 60_000]),
+	),
+};
+
 function environment() {
 	return {
 		OPS_ALERTS_ENABLED: "true",
@@ -46,7 +57,10 @@ function environment() {
 			list: async () => ({ objects: [], truncated: false }),
 		},
 		ANALYTICS_BACKUPS: {
-			get: async () => ({ size: 300, json: async () => manifest }),
+			get: async (key: string) =>
+				key === alertStateKey
+					? { size: 300, json: async () => seenAnHourAgo }
+					: { size: 300, json: async () => manifest },
 			head: async () => ({ size: manifest.size }),
 		},
 	} as Bindings;
@@ -197,12 +211,14 @@ function withAlertState(env: Bindings) {
 	return objects;
 }
 
-test("several failing checks send one plain-language alert and repeat it at most hourly", async () => {
+test("failing checks send one plain-language alert once the next check confirms them, repeated at most hourly", async () => {
 	const env = failingEnvironment();
 	const state = withAlertState(env);
 	const emails = captureEmails();
 	await checkOperations(env, now, fetch, 12_000, skipWait);
+	expect(emails).toHaveLength(0);
 	await checkOperations(env, now + 5 * 60_000, fetch, 12_000, skipWait);
+	await checkOperations(env, now + 10 * 60_000, fetch, 12_000, skipWait);
 	expect(emails).toHaveLength(1);
 	expect(state.has("operations/alert-state.json")).toBe(true);
 	await checkOperations(env, now + 61 * 60_000, fetch, 12_000, skipWait);
@@ -211,11 +227,13 @@ test("several failing checks send one plain-language alert and repeat it at most
 	const message = JSON.parse(emails[0].body);
 	expect(message.to).toEqual(["owner@example.test"]);
 	expect(message.subject).toBe(
-		"[NDLE] Needs attention: The latest backup couldn't be found or verified (+5 more)",
+		"[NDLE] Needs attention: The latest backup couldn't be found or verified (+4 more)",
 	);
+	// Link monitoring waits 30 minutes, so the first alert leaves it out.
+	expect(message.text).not.toContain("Link monitoring is not running");
 	for (const expected of [
 		"Clicks are waiting longer than usual to be counted",
-		"What we measured: 1 click is waiting (1 KB); the oldest has waited 6 minutes.",
+		"What we measured: 1 click is waiting (1 KB); the oldest has waited 11 minutes.",
 		"Is anything lost? No. Waiting clicks are kept for 14 days",
 		"What to do:",
 		"It's fixed when:",
@@ -251,6 +269,7 @@ test("an all-clear email names the problems that were fixed", async () => {
 	const state = withAlertState(env);
 	const emails = captureEmails();
 	await checkOperations(env, now, fetch, 12_000, skipWait);
+	await checkOperations(env, now + 5 * 60_000, fetch, 12_000, skipWait);
 	const healthyEnv = {
 		...environment(),
 		ANALYTICS_BACKUPS: env.ANALYTICS_BACKUPS,
@@ -298,18 +317,12 @@ test("an all-clear email names the problems that were fixed", async () => {
 	expect(emails).toHaveLength(2);
 });
 
-test("expired backups alert at once while a failed metric read waits", async () => {
+test("expired backups alert while a failed metric read is only logged", async () => {
 	const env = environment();
 	env.CLICK_EVENTS.metrics = async () => {
 		throw new Error("Queue request failed");
 	};
-	env.ANALYTICS_BACKUPS.get = mock(async () => ({
-		size: 300,
-		json: async () => ({
-			...manifest,
-			createdAt: new Date(now - 27 * 60 * 60_000).toISOString(),
-		}),
-	}));
+	env.ANALYTICS_BACKUPS.get = expiredBackup(env.ANALYTICS_BACKUPS.get);
 	let text = "";
 	spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
 		if (String(input).includes("resend.com")) {
@@ -327,8 +340,22 @@ test("expired backups alert at once while a failed metric read waits", async () 
 	expect(text).not.toContain("Could not read the click queue's status");
 });
 
-/** Healthy services apart from an optional monitoring outage. */
-function captureAlerts(service = { monitorReady: true }) {
+/** Serves a 27-hour-old backup manifest; other keys go to `get`. */
+function expiredBackup(get: Bindings["ANALYTICS_BACKUPS"]["get"]) {
+	return (async (key: string) =>
+		key === alertStateKey
+			? get(key)
+			: {
+					size: 300,
+					json: async () => ({
+						...manifest,
+						createdAt: new Date(now - 27 * 60 * 60_000).toISOString(),
+					}),
+				}) as unknown as Bindings["ANALYTICS_BACKUPS"]["get"];
+}
+
+/** Healthy services apart from optional analytics or monitoring outages. */
+function captureAlerts(service = { analyticsUp: true, monitorReady: true }) {
 	const emails: Array<{ subject: string; text: string }> = [];
 	spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
 		const url = String(input);
@@ -336,9 +363,11 @@ function captureAlerts(service = { monitorReady: true }) {
 			emails.push(JSON.parse(String(init?.body)));
 			return Response.json({ id: "accepted" });
 		}
+		if (url.includes("api.ndle.app") && !service.analyticsUp)
+			throw new TypeError("Network connection lost.");
 		if (url.includes("/health/detailed")) return Response.json(healthy);
 		if (url.includes("monitor.") && !service.monitorReady)
-			return Response.json({ status: "not_ready" }, { status: 503 });
+			return Response.json({ status: "not ready" }, { status: 503 });
 		return Response.json({ status: "ready" });
 	});
 	return emails;
@@ -358,15 +387,14 @@ function runAt(env: Bindings, minutes: number) {
 	return checkOperations(env, now + minutes * 60_000, fetch, 12_000, skipWait);
 }
 
-test("a brief failure to read the click queue is logged but sends no email or all-clear", async () => {
+test("a failure to read the click queue is only logged, however long it lasts", async () => {
 	const env = environment();
 	const state = withAlertState(env);
 	const emails = captureAlerts();
 	const warn = spyOn(console, "warn");
 	const queue = unreadableClickQueue(env);
-	for (const minutes of [0, 5, 10, 25]) await runAt(env, minutes);
+	for (let minutes = 0; minutes <= 120; minutes += 5) await runAt(env, minutes);
 	expect(emails).toHaveLength(0);
-	expect(state.has("operations/alert-state.json")).toBe(true);
 	// Only the error name and Cloudflare's code are logged, not its message.
 	expect(warn).toHaveBeenCalledWith(
 		JSON.stringify({
@@ -377,79 +405,103 @@ test("a brief failure to read the click queue is logged but sends no email or al
 		}),
 	);
 	queue.readable = true;
-	await runAt(env, 30);
+	await runAt(env, 125);
 	expect(emails).toHaveLength(0);
-	expect(state.has("operations/alert-state.json")).toBe(false);
-	// A later failure starts the 30 minutes again.
-	queue.readable = false;
-	for (const minutes of [35, 60]) await runAt(env, minutes);
-	expect(emails).toHaveLength(0);
+	expect(state.has(alertStateKey)).toBe(false);
 });
 
-test("a click queue read failure lasting 30 minutes is emailed once, then cleared", async () => {
+test("a failure the next check no longer sees sends nothing", async () => {
+	const env = environment();
+	const state = withAlertState(env);
+	const service = { analyticsUp: false, monitorReady: true };
+	const emails = captureAlerts(service);
+	await runAt(env, 0);
+	expect(state.has(alertStateKey)).toBe(true);
+	service.analyticsUp = true;
+	await runAt(env, 5);
+	expect(emails).toHaveLength(0);
+	expect(state.has(alertStateKey)).toBe(false);
+});
+
+test("a failure still there at the next check is emailed, then cleared", async () => {
 	const env = environment();
 	withAlertState(env);
-	const emails = captureAlerts();
-	const queue = unreadableClickQueue(env);
+	const service = { analyticsUp: false, monitorReady: true };
+	const emails = captureAlerts(service);
+	await runAt(env, 0);
+	expect(emails).toHaveLength(0);
+	await runAt(env, 5);
+	expect(emails).toHaveLength(1);
+	expect(emails[0].subject).toBe(
+		"[NDLE] Urgent: The analytics service can't be reached",
+	);
+	expect(emails[0].text).toContain("about 5 minutes");
+	service.analyticsUp = true;
+	await runAt(env, 10);
+	expect(emails).toHaveLength(2);
+	expect(emails[1].text).toContain(
+		"Analytics service: The analytics service can't be reached",
+	);
+});
+
+test("link monitoring is emailed only after 30 minutes down, then cleared", async () => {
+	const env = environment();
+	withAlertState(env);
+	const service = { analyticsUp: true, monitorReady: false };
+	const emails = captureAlerts(service);
 	for (const minutes of [0, 5, 10, 15, 20, 25]) await runAt(env, minutes);
 	expect(emails).toHaveLength(0);
 	await runAt(env, 30);
 	await runAt(env, 35);
 	expect(emails).toHaveLength(1);
 	expect(emails[0].subject).toBe(
-		"[NDLE] Needs attention: Could not read the click queue's status",
+		"[NDLE] Needs attention: Link monitoring is not running",
 	);
-	expect(emails[0].text).toContain("Going on since");
-	expect(emails[0].text).toContain("about 30 minutes");
-	expect(emails[0].text).toContain('search for "NDLE operations check failed"');
-	queue.readable = true;
+	expect(emails[0].text).toContain("For at least 30 minutes");
+	service.monitorReady = true;
 	await runAt(env, 40);
 	expect(emails).toHaveLength(2);
-	expect(emails[1].subject).toBe(
-		"[NDLE] All clear: everything is working again",
-	);
-	expect(emails[1].text).toContain(
-		"Clicks: Could not read the click queue's status",
-	);
 	expect(emails[1].text).toContain("lasted about 40 minutes");
 });
 
-test("a waiting read failure keeps its start time while another problem is emailed", async () => {
+test("a waiting problem keeps its start time while another problem is emailed", async () => {
 	const env = environment();
+	env.ANALYTICS_BACKUPS.get = expiredBackup(env.ANALYTICS_BACKUPS.get);
 	withAlertState(env);
-	const emails = captureAlerts({ monitorReady: false });
-	const queue = unreadableClickQueue(env);
-	queue.readable = true;
+	const service = { analyticsUp: true, monitorReady: true };
+	const emails = captureAlerts(service);
 	await runAt(env, 0);
+	await runAt(env, 5);
 	expect(emails).toHaveLength(1);
-	queue.readable = false;
-	for (const minutes of [5, 10, 15, 20, 25, 30]) await runAt(env, minutes);
+	service.monitorReady = false;
+	for (let minutes = 10; minutes <= 35; minutes += 5) await runAt(env, minutes);
 	expect(emails).toHaveLength(1);
-	await runAt(env, 35);
+	await runAt(env, 40);
 	expect(emails).toHaveLength(2);
 	expect(emails[1].subject).toBe(
-		"[NDLE] Needs attention: Could not read the click queue's status (+1 more)",
+		"[NDLE] Needs attention: The latest database backup is more than a day old (+1 more)",
 	);
 });
 
-test("an all-clear waits until a brief read failure passes too", async () => {
+test("an all-clear waits until a logged read failure passes too", async () => {
 	const env = environment();
 	withAlertState(env);
-	const service = { monitorReady: false };
+	const service = { analyticsUp: false, monitorReady: true };
 	const emails = captureAlerts(service);
 	const queue = unreadableClickQueue(env);
 	queue.readable = true;
 	await runAt(env, 0);
-	expect(emails).toHaveLength(1);
-	service.monitorReady = true;
-	queue.readable = false;
 	await runAt(env, 5);
 	expect(emails).toHaveLength(1);
-	queue.readable = true;
+	service.analyticsUp = true;
+	queue.readable = false;
 	await runAt(env, 10);
+	expect(emails).toHaveLength(1);
+	queue.readable = true;
+	await runAt(env, 15);
 	expect(emails).toHaveLength(2);
 	expect(emails[1].text).toContain(
-		"Link monitoring: Link monitoring is not running",
+		"Analytics service: The analytics service can't be reached",
 	);
 	expect(emails[1].text).not.toContain("click queue");
 });
