@@ -76,5 +76,16 @@ export function parseQueuedClick(value: unknown): QueuedClick {
 	) {
 		throw new Error("Click event is missing its time, link, or owner");
 	}
+	// Ingest's limits: a click it would reject is archived now as invalid
+	// rather than retried for a day.
+	if (
+		event.link_id.length > 256 ||
+		event.user_id.length > 256 ||
+		Object.values(event).some(
+			(field) => typeof field === "string" && field.length > 8192,
+		)
+	) {
+		throw new Error("Click event has a field longer than ingest accepts");
+	}
 	return { version: 1, event };
 }

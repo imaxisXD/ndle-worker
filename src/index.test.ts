@@ -155,3 +155,35 @@ test("missing or empty SHORT_LINK_HOSTS keeps the production short-link hosts", 
 		expect(denied.send).not.toHaveBeenCalled();
 	}
 });
+
+test("visitor-supplied click fields are cut below ingest's limit", async () => {
+	serveLink({});
+	const events: QueuedClick[] = [];
+	const send = mock(async (body: QueuedClick) => {
+		events.push(body);
+	});
+	const long = "a".repeat(9000);
+	const response = await app.request(
+		`https://ndle.fyi/test?utm_source=${long}&utm_content=${"b".repeat(255)}😀`,
+		{
+			headers: {
+				"User-Agent": `Mozilla/5.0 ${long}`,
+				Referer: `https://example.org/${long}`,
+				"Accept-Language": long,
+				"Sec-CH-UA": `"${long}";v="1"`,
+				"Sec-CH-UA-Platform": `"${long}"`,
+			},
+		},
+		{ CLICK_EVENTS: { send }, SHORT_LINK_HOSTS: "ndle.fyi" },
+	);
+	expect(response.status).toBe(302);
+	const event = events[0]?.event;
+	expect(event?.utm_source).toHaveLength(256);
+	// A cut never leaves half of a surrogate pair behind.
+	expect(event?.utm_content).toBe("b".repeat(255));
+	expect(event?.user_agent).toHaveLength(512);
+	expect(event?.referer).toHaveLength(2048);
+	expect(event?.language).toHaveLength(35);
+	expect(event?.browser).toHaveLength(64);
+	expect(event?.os).toHaveLength(64);
+});

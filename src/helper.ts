@@ -436,6 +436,24 @@ async function generateSessionId(
 	}
 }
 
+// Visitors control these fields. Ingest rejects any text over 8192 characters,
+// so each is cut well below that: one oversized header or query parameter must
+// not turn a click undeliverable.
+const visitorFieldLimits = {
+	userAgent: 512,
+	referer: 2048,
+	utm: 256,
+	language: 35,
+	browser: 64,
+	os: 64,
+};
+
+function clip<T extends string | null>(value: T, max: number): T {
+	if (value === null || value.length <= max) return value;
+	// Drop a high surrogate the cut would leave unpaired.
+	return value.slice(0, max).replace(/[\uD800-\uDBFF]$/, "") as T;
+}
+
 /**
  * Build analytics event input mapped from Cloudflare Worker request/environment.
  */
@@ -455,21 +473,33 @@ async function buildAnalyticsInput(
 	const url = new URL(req.url);
 	const shortUrl = `${url.origin}/${slug}`;
 	const userAgent = req.header("user-agent") ?? "";
-	const ref = req.header("referer") ?? req.header("referrer") ?? null;
+	const ref = clip(
+		req.header("referer") ?? req.header("referrer") ?? null,
+		visitorFieldLimits.referer,
+	);
 
 	// Prefer client hints when available for device, else UA parsing
 	const deviceType = getDeviceType(userAgent, req.header("sec-ch-ua-mobile"));
-	const browser = getBrowser(
-		userAgent,
-		req.header("sec-ch-ua-full-version-list") ?? req.header("sec-ch-ua"),
+	const browser = clip(
+		getBrowser(
+			userAgent,
+			req.header("sec-ch-ua-full-version-list") ?? req.header("sec-ch-ua"),
+		),
+		visitorFieldLimits.browser,
 	);
-	const os = getOS(userAgent, req.header("sec-ch-ua-platform"));
+	const os = clip(
+		getOS(userAgent, req.header("sec-ch-ua-platform")),
+		visitorFieldLimits.os,
+	);
 	const ip =
 		req.header("cf-connecting-ip") ?? req.header("x-forwarded-for") ?? "";
 	const ipHash = await hashVisitorIp(ip, c.env.IP_HASH_SECRET);
 	const languageHeader = req.header("accept-language") ?? null;
 	const language = languageHeader
-		? languageHeader.split(",")[0]?.trim() || null
+		? clip(
+				languageHeader.split(",")[0]?.trim() || null,
+				visitorFieldLimits.language,
+			)
 		: null;
 	const trackingEnabled =
 		getBooleanEnv(c.env.TRACKING_ENABLED, true) &&
@@ -492,26 +522,36 @@ async function buildAnalyticsInput(
 		firstClickOfSession = false;
 	}
 
-	const utm_source =
+	const utm_source = clip(
 		url.searchParams.get("utm_source") ||
-		redisValue?.utm_params?.utm_source ||
-		null;
-	const utm_medium =
+			redisValue?.utm_params?.utm_source ||
+			null,
+		visitorFieldLimits.utm,
+	);
+	const utm_medium = clip(
 		url.searchParams.get("utm_medium") ||
-		redisValue?.utm_params?.utm_medium ||
-		null;
-	const utm_campaign =
+			redisValue?.utm_params?.utm_medium ||
+			null,
+		visitorFieldLimits.utm,
+	);
+	const utm_campaign = clip(
 		url.searchParams.get("utm_campaign") ||
-		redisValue?.utm_params?.utm_campaign ||
-		null;
-	const utm_term =
+			redisValue?.utm_params?.utm_campaign ||
+			null,
+		visitorFieldLimits.utm,
+	);
+	const utm_term = clip(
 		url.searchParams.get("utm_term") ||
-		redisValue?.utm_params?.utm_term ||
-		null;
-	const utm_content =
+			redisValue?.utm_params?.utm_term ||
+			null,
+		visitorFieldLimits.utm,
+	);
+	const utm_content = clip(
 		url.searchParams.get("utm_content") ||
-		redisValue?.utm_params?.utm_content ||
-		null;
+			redisValue?.utm_params?.utm_content ||
+			null,
+		visitorFieldLimits.utm,
+	);
 
 	return {
 		idempotency_key: requestId,
@@ -529,7 +569,7 @@ async function buildAnalyticsInput(
 		request_id: requestId,
 		worker_datacenter: cf.colo ?? "",
 		worker_version: c.env.WORKER_VERSION ?? "dev",
-		user_agent: userAgent,
+		user_agent: clip(userAgent, visitorFieldLimits.userAgent),
 		device_type: deviceType,
 		browser: browser,
 		os: os,

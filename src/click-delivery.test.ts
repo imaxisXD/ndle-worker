@@ -680,3 +680,44 @@ for (const secrets of [
 		expect(send).not.toHaveBeenCalled();
 	});
 }
+
+test("a click with a field ingest would reject is archived, not retried", async () => {
+	const requests = mockIngest(() => undefined);
+	recordInConvex();
+	const objects = new Map<string, string>();
+	const bucket = {
+		async put(key: string, value: string) {
+			if (objects.has(key)) return null;
+			objects.set(key, value);
+			return {};
+		},
+		async get(key: string) {
+			const value = objects.get(key);
+			return value === undefined
+				? null
+				: {
+						size: value.length,
+						json: async () => JSON.parse(value),
+						text: async () => value,
+					};
+		},
+	};
+	const oversized = click("oversized", { utm_source: "a".repeat(8193) });
+	const longOwner = click("long-owner", { user_id: "u".repeat(257) });
+	await consume([oversized, longOwner], {
+		...env,
+		FAILED_CLICK_ARCHIVES: bucket,
+	} as unknown as Bindings);
+	expect(() => parseQueuedClick(oversized.body)).toThrow(
+		"Click event has a field longer than ingest accepts",
+	);
+	expect(requests).toHaveLength(0);
+	for (const item of [oversized, longOwner]) {
+		expect(item.ack).toHaveBeenCalledTimes(1);
+		expect(item.retry).not.toHaveBeenCalled();
+	}
+	const archives = [...objects.entries()]
+		.filter(([key]) => key.includes("/archive/"))
+		.map(([, value]) => JSON.parse(value).reason);
+	expect(archives).toEqual(["invalid_event", "invalid_event"]);
+});
