@@ -13,9 +13,7 @@ export type AlertState = {
 };
 
 /** Resolves null when no usable state exists; rejects when R2 can't be read. */
-export async function readAlertState(
-	env: OperationsBindings,
-): Promise<AlertState | null> {
+export async function readAlertState(env: OperationsBindings): Promise<AlertState | null> {
 	const object = await env.ANALYTICS_BACKUPS.get(alertStateKey);
 	if (!object || object.size > 16_384) return null;
 	try {
@@ -23,9 +21,7 @@ export async function readAlertState(
 		if (
 			value.version !== 1 ||
 			!Array.isArray(value.issues) ||
-			!value.issues.every(
-				(issue) => typeof issue === "string" && issue in issuePlaybooks,
-			)
+			!value.issues.every((issue) => typeof issue === "string" && issue in issuePlaybooks)
 		)
 			return null;
 		const firstSeen = record(value.firstSeen ?? {});
@@ -37,8 +33,7 @@ export async function readAlertState(
 					([issue, time]) => issue in issuePlaybooks && Number.isFinite(time),
 				),
 			) as AlertState["firstSeen"],
-			alertedAt:
-				typeof value.alertedAt === "number" ? value.alertedAt : undefined,
+			alertedAt: typeof value.alertedAt === "number" ? value.alertedAt : undefined,
 		};
 	} catch {
 		return null;
@@ -84,11 +79,9 @@ export async function writeAlertState(
 		await withDeadline(
 			async () =>
 				state
-					? await env.ANALYTICS_BACKUPS.put(
-							alertStateKey,
-							JSON.stringify(state),
-							{ httpMetadata: { contentType: "application/json" } },
-						)
+					? await env.ANALYTICS_BACKUPS.put(alertStateKey, JSON.stringify(state), {
+							httpMetadata: { contentType: "application/json" },
+						})
 					: await env.ANALYTICS_BACKUPS.delete(alertStateKey),
 			10_000,
 		);

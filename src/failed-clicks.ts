@@ -64,16 +64,13 @@ function encodeBody(value: unknown): StoredBody {
 			typeof original === "bigint" ||
 			typeof original === "function" ||
 			typeof original === "symbol" ||
-			(typeof original === "number" &&
-				(!Number.isFinite(original) || Object.is(original, -0))) ||
+			(typeof original === "number" && (!Number.isFinite(original) || Object.is(original, -0))) ||
 			(original !== null &&
 				typeof original === "object" &&
 				!Array.isArray(original) &&
 				Object.getPrototypeOf(original) !== Object.prototype)
 		)
-			throw new Error(
-				"Failed click cannot be archived without changing its body",
-			);
+			throw new Error("Failed click cannot be archived without changing its body");
 		return item;
 	});
 	return { encoding: "json", data };
@@ -83,9 +80,7 @@ export function decodeFailedBody(body: StoredBody): unknown {
 	if (body.encoding === "json") return JSON.parse(body.data);
 	if (body.encoding === "undefined") return undefined;
 	if (body.encoding === "bytes")
-		return Uint8Array.from(atob(body.data), (character) =>
-			character.charCodeAt(0),
-		).buffer;
+		return Uint8Array.from(atob(body.data), (character) => character.charCodeAt(0)).buffer;
 	throw new Error("Failed click has an unknown body encoding");
 }
 
@@ -110,10 +105,7 @@ export async function readFailedArchive(
 	) {
 		throw new Error("Failed click archive failed its integrity check");
 	}
-	if (
-		failedClickKeys(archive.source.queue, archive.source.messageId).archive !==
-		key
-	)
+	if (failedClickKeys(archive.source.queue, archive.source.messageId).archive !== key)
 		throw new Error("Failed click archive does not match its source");
 	return archive;
 }
@@ -154,10 +146,7 @@ export async function archiveFailedClick(
 	// A repeated queue delivery has a new attempt count. Only stable identity and
 	// body participate in equality; never overwrite the first archived metadata.
 	const stored = await readFailedArchive(bucket, keys.archive);
-	if (
-		stored.bodySha256 !== bodySha256 ||
-		stored.source.sentAt !== archive.source.sentAt
-	) {
+	if (stored.bodySha256 !== bodySha256 || stored.source.sentAt !== archive.source.sentAt) {
 		throw new Error("Failed click ID already has a different archived message");
 	}
 	const pointer = JSON.stringify({
@@ -207,10 +196,7 @@ export async function consumeFailedClicks(
 				// With 100 configured retries, the retry limit cannot exhaust before the
 				// queue's 14-day retention period. Long R2 outages still require response.
 				message.retry({
-					delaySeconds: Math.min(
-						43_200,
-						60 * 2 ** Math.min(message.attempts, 10),
-					),
+					delaySeconds: Math.min(43_200, 60 * 2 ** Math.min(message.attempts, 10)),
 				});
 			}
 		}),

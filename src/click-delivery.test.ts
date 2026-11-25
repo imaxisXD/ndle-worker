@@ -52,10 +52,7 @@ const env = {
 	LOG_LEVEL: "error",
 } as Bindings;
 
-function message(
-	body: unknown = { version: 1, event },
-	id = "queue-message-1",
-) {
+function message(body: unknown = { version: 1, event }, id = "queue-message-1") {
 	return {
 		body,
 		id,
@@ -74,14 +71,8 @@ function click(id: string, fields: Partial<AnalyticsEvent> = {}) {
 		`message-${id}`,
 	);
 }
-async function consume(
-	items: Array<ReturnType<typeof message>>,
-	bindings: Bindings = env,
-) {
-	await consumeClicks(
-		{ queue: "test", messages: items, ackAll() {}, retryAll() {} },
-		bindings,
-	);
+async function consume(items: Array<ReturnType<typeof message>>, bindings: Bindings = env) {
+	await consumeClicks({ queue: "test", messages: items, ackAll() {}, retryAll() {} }, bindings);
 }
 async function deliver(item: ReturnType<typeof message>) {
 	await consume([item]);
@@ -108,9 +99,7 @@ function batchResults(
 }
 
 type MockTransportOptions = {
-	ingest?: (
-		request: IngestRequest,
-	) => Response | undefined | Promise<Response | undefined>;
+	ingest?: (request: IngestRequest) => Response | undefined | Promise<Response | undefined>;
 	convex?: (args: RecordClickArgs) => unknown | Promise<unknown>;
 };
 
@@ -118,43 +107,39 @@ type MockTransportOptions = {
 function mockTransport(options: MockTransportOptions = {}) {
 	const ingestRequests: IngestRequest[] = [];
 	const convexCalls: RecordClickArgs[] = [];
-	const convexHandler =
-		options.convex ?? (async () => ({ outcome: "recorded" }));
+	const convexHandler = options.convex ?? (async () => ({ outcome: "recorded" }));
 
-	const fetchSpy = spyOn(globalThis, "fetch").mockImplementation(
-		async (input, init) => {
-			const url = new URL(String(input));
-			const path = url.pathname;
-			if (path === "/api/mutation") {
-				const parsed = JSON.parse(String(init?.body)) as {
-					args: [RecordClickArgs];
-				};
-				const args = parsed.args[0];
-				convexCalls.push(args);
-				try {
-					const value = await convexHandler(args);
-					return Response.json({ status: "success", value });
-				} catch (error) {
-					return Response.json(
-						{
-							status: "error",
-							errorMessage:
-								error instanceof Error ? error.message : String(error),
-						},
-						{ status: 560 },
-					);
-				}
-			}
-			const body = JSON.parse(String(init?.body));
-			const request: IngestRequest = {
-				path,
-				authorization: new Headers(init?.headers).get("Authorization"),
-				events: path.endsWith("/batch") ? body.events : [body],
+	const fetchSpy = spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
+		const url = new URL(String(input));
+		const path = url.pathname;
+		if (path === "/api/mutation") {
+			const parsed = JSON.parse(String(init?.body)) as {
+				args: [RecordClickArgs];
 			};
-			ingestRequests.push(request);
-			return (await options.ingest?.(request)) ?? batchResults(request);
-		},
-	);
+			const args = parsed.args[0];
+			convexCalls.push(args);
+			try {
+				const value = await convexHandler(args);
+				return Response.json({ status: "success", value });
+			} catch (error) {
+				return Response.json(
+					{
+						status: "error",
+						errorMessage: error instanceof Error ? error.message : String(error),
+					},
+					{ status: 560 },
+				);
+			}
+		}
+		const body = JSON.parse(String(init?.body));
+		const request: IngestRequest = {
+			path,
+			authorization: new Headers(init?.headers).get("Authorization"),
+			events: path.endsWith("/batch") ? body.events : [body],
+		};
+		ingestRequests.push(request);
+		return (await options.ingest?.(request)) ?? batchResults(request);
+	});
 	return { ingestRequests, convexCalls, fetchSpy };
 }
 
@@ -171,9 +156,7 @@ test("retries a rejected ingest response without acknowledging or updating live 
 });
 
 test("retries network errors instead of losing the queued event", async () => {
-	spyOn(globalThis, "fetch").mockRejectedValue(
-		new Error("Network unavailable"),
-	);
+	spyOn(globalThis, "fetch").mockRejectedValue(new Error("Network unavailable"));
 	const item = message();
 	await deliver(item);
 	expect(item.ack).not.toHaveBeenCalled();
@@ -195,9 +178,10 @@ test("replay keeps one event ID when Convex fails after ingest commits", async (
 	await deliver(retry);
 	expect(first.retry).toHaveBeenCalledTimes(1);
 	expect(retry.ack).toHaveBeenCalledTimes(1);
-	expect(
-		ingestRequests.map((request) => request.events[0].idempotency_key),
-	).toEqual([event.idempotency_key, event.idempotency_key]);
+	expect(ingestRequests.map((request) => request.events[0].idempotency_key)).toEqual([
+		event.idempotency_key,
+		event.idempotency_key,
+	]);
 	for (const call of convexCalls) {
 		expect(call).toMatchObject({
 			requestId: event.idempotency_key,
@@ -206,13 +190,7 @@ test("replay keeps one event ID when Convex fails after ingest commits", async (
 	}
 });
 
-for (const outcome of [
-	"recorded",
-	"duplicate",
-	"link_deleted",
-	"tracking_disabled",
-	"too_old",
-]) {
+for (const outcome of ["recorded", "duplicate", "link_deleted", "tracking_disabled", "too_old"]) {
 	test(`acknowledges the explicit Convex outcome ${outcome}`, async () => {
 		mockTransport({ convex: async () => ({ outcome }) });
 		const item = message();
@@ -256,9 +234,7 @@ test("malformed queued events retry if durable archival is unavailable", async (
 
 test("one batch request carries every tracked click in queue order", async () => {
 	const { ingestRequests, convexCalls } = mockTransport();
-	const clicks = Array.from({ length: 25 }, (_, index) =>
-		click(`event-${index}`),
-	);
+	const clicks = Array.from({ length: 25 }, (_, index) => click(`event-${index}`));
 	const disabled = click("disabled", { tracking_enabled: false });
 	const malformed = message(
 		{ version: 1, event: { ...event, request_id: "different-id" } },
@@ -283,13 +259,9 @@ test("one batch request carries every tracked click in queue order", async () =>
 
 test("more than 100 clicks are split into batches of at most 100", async () => {
 	const { ingestRequests } = mockTransport();
-	const clicks = Array.from({ length: 205 }, (_, index) =>
-		click(`event-${index}`),
-	);
+	const clicks = Array.from({ length: 205 }, (_, index) => click(`event-${index}`));
 	await consume(clicks);
-	expect(ingestRequests.map((request) => request.events.length)).toEqual([
-		100, 100, 5,
-	]);
+	expect(ingestRequests.map((request) => request.events.length)).toEqual([100, 100, 5]);
 	expect(ingestRequests.flatMap((request) => request.events)).toHaveLength(205);
 	for (const item of clicks) expect(item.ack).toHaveBeenCalledTimes(1);
 });
@@ -315,10 +287,7 @@ test("each batch result decides its own click's outcome", async () => {
 		expect(item.ack).not.toHaveBeenCalled();
 		expect(item.retry).toHaveBeenCalledWith({ delaySeconds: 10 });
 	}
-	expect(convexCalls.map((call) => call.requestId).sort()).toEqual([
-		"duplicate",
-		"recorded",
-	]);
+	expect(convexCalls.map((call) => call.requestId).sort()).toEqual(["duplicate", "recorded"]);
 });
 
 test("an invalid result may omit the key it could not read", async () => {
@@ -364,9 +333,7 @@ test("Convex writes run at most 10 at a time", async () => {
 			return { outcome: "recorded" };
 		},
 	});
-	const clicks = Array.from({ length: 35 }, (_, index) =>
-		click(`event-${index}`),
-	);
+	const clicks = Array.from({ length: 35 }, (_, index) => click(`event-${index}`));
 	await consume(clicks);
 	expect(peak).toBe(10);
 	for (const item of clicks) expect(item.ack).toHaveBeenCalledTimes(1);
@@ -379,9 +346,7 @@ test("a Convex failure retries only that click", async () => {
 			return { outcome: "recorded" };
 		},
 	});
-	const [before, failing, after] = ["before", "failing", "after"].map((id) =>
-		click(id),
-	);
+	const [before, failing, after] = ["before", "failing", "after"].map((id) => click(id));
 	await consume([before, failing, after]);
 	expect(failing.ack).not.toHaveBeenCalled();
 	expect(failing.retry).toHaveBeenCalledTimes(1);
@@ -500,9 +465,7 @@ test("per-click delivery still refuses an ignored response for a tracked click",
 				{ status: 202 },
 			),
 	});
-	await expect(deliverClick(event, env)).rejects.toThrow(
-		"did not confirm this event was accepted",
-	);
+	await expect(deliverClick(event, env)).rejects.toThrow("did not confirm this event was accepted");
 	expect(convexCalls).toHaveLength(0);
 });
 
@@ -613,9 +576,7 @@ for (const { secrets, write, ops } of scopedSecrets) {
 	test(`click delivery authorizes ingest with ${write} given ${names}`, async () => {
 		const calls = acceptIngest();
 		expect(await deliverClick(event, secretEnv)).toBe("recorded");
-		expect(calls).toEqual([
-			{ path: "/ingest", authorization: `Bearer ${write}` },
-		]);
+		expect(calls).toEqual([{ path: "/ingest", authorization: `Bearer ${write}` }]);
 	});
 
 	test(`batch delivery authorizes ingest with ${write} given ${names}`, async () => {
@@ -658,11 +619,7 @@ test("click delivery settings are incomplete without a write or shared secret", 
 	expect(send).not.toHaveBeenCalled();
 });
 
-for (const secrets of [
-	{ OPS_SECRET: "ops" },
-	{ INGEST_WRITE_SECRET: "write" },
-	{},
-]) {
+for (const secrets of [{ OPS_SECRET: "ops" }, { INGEST_WRITE_SECRET: "write" }, {}]) {
 	test(`resolve refuses to start with only ${Object.keys(secrets).join(", ") || "no ingest secret"}`, async () => {
 		const { key, bucket } = await archivedClick();
 		const send = spyOn(globalThis, "fetch");

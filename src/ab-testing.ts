@@ -39,10 +39,7 @@ function selectWeightedVariant(variants: ABVariant[]): ABVariant | null {
  * Deterministic variant selection based on session ID.
  * Same session always gets same variant for consistency.
  */
-function selectDeterministicVariant(
-	variants: ABVariant[],
-	sessionId: string,
-): ABVariant | null {
+function selectDeterministicVariant(variants: ABVariant[], sessionId: string): ABVariant | null {
 	if (!variants.length) return null;
 
 	// Hash session ID to get consistent bucket

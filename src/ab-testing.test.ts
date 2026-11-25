@@ -5,9 +5,7 @@ import type { ABVariant } from "./types";
 afterEach(() => mock.restore());
 
 function mockRandomUint32(value: number) {
-	return spyOn(crypto, "getRandomValues").mockImplementation(((
-		array: Uint32Array,
-	) => {
+	return spyOn(crypto, "getRandomValues").mockImplementation(((array: Uint32Array) => {
 		array[0] = value;
 		return array;
 	}) as typeof crypto.getRandomValues);

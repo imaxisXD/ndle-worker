@@ -1,9 +1,5 @@
 import { expect, mock, test } from "bun:test";
-import {
-	batchEndpoint,
-	sendAnalyticsBatch,
-	sendAnalyticsEvent,
-} from "./analytics";
+import { batchEndpoint, sendAnalyticsBatch, sendAnalyticsEvent } from "./analytics";
 import type { AnalyticsEvent } from "./types";
 
 const event = {
@@ -26,12 +22,8 @@ const event = {
 } satisfies Partial<AnalyticsEvent>;
 
 test("the batch route is derived from INGEST_ENDPOINT", () => {
-	expect(batchEndpoint("https://api.ndle.app/ingest")).toBe(
-		"https://api.ndle.app/ingest/batch",
-	);
-	expect(batchEndpoint("https://api.ndle.app/ingest/")).toBe(
-		"https://api.ndle.app/ingest/batch",
-	);
+	expect(batchEndpoint("https://api.ndle.app/ingest")).toBe("https://api.ndle.app/ingest/batch");
+	expect(batchEndpoint("https://api.ndle.app/ingest/")).toBe("https://api.ndle.app/ingest/batch");
 });
 
 test("a batch sends the same normalized events as single delivery", async () => {
@@ -42,21 +34,15 @@ test("a batch sends the same normalized events as single delivery", async () => 
 			bodies.length === 1
 				? {
 						success: true,
-						results: [
-							{ index: 0, idempotency_key: "event-123", status: "recorded" },
-						],
+						results: [{ index: 0, idempotency_key: "event-123", status: "recorded" }],
 					}
 				: { success: true, status: "queued", idempotency_key: "event-123" },
 			{ status: bodies.length === 1 ? 200 : 202 },
 		);
 	}) as unknown as typeof fetch;
 	const target = { endpoint: "https://api.ndle.app/ingest", token: "t" };
-	expect(
-		await sendAnalyticsBatch({ ...target, events: [event], fetchImpl }),
-	).toEqual(["recorded"]);
-	expect(await sendAnalyticsEvent({ ...target, event, fetchImpl })).toBe(
-		"queued",
-	);
+	expect(await sendAnalyticsBatch({ ...target, events: [event], fetchImpl })).toEqual(["recorded"]);
+	expect(await sendAnalyticsEvent({ ...target, event, fetchImpl })).toBe("queued");
 	expect(bodies[0]).toEqual({ events: [bodies[1]] });
 });
 
@@ -64,9 +50,9 @@ test("a batch must contain 1 to 100 events", async () => {
 	const fetchImpl = mock() as unknown as typeof fetch;
 	const target = { endpoint: "https://api.ndle.app/ingest", token: "t" };
 	for (const events of [[], Array.from({ length: 101 }, () => event)])
-		await expect(
-			sendAnalyticsBatch({ ...target, events, fetchImpl }),
-		).rejects.toThrow("1 to 100 events");
+		await expect(sendAnalyticsBatch({ ...target, events, fetchImpl })).rejects.toThrow(
+			"1 to 100 events",
+		);
 	expect(fetchImpl).not.toHaveBeenCalled();
 });
 

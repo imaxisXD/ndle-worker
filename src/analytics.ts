@@ -6,13 +6,9 @@ const trailingSlashesRegex = /\/+$/;
 /**
  * Normalize input into the exact payload the API expects.
  */
-export function normalizeAnalyticsEvent(
-	input: AnalyticsEventInput,
-): AnalyticsEvent {
+export function normalizeAnalyticsEvent(input: AnalyticsEventInput): AnalyticsEvent {
 	const occurredAtIso =
-		typeof input.occurred_at === "string"
-			? input.occurred_at
-			: input.occurred_at.toISOString();
+		typeof input.occurred_at === "string" ? input.occurred_at : input.occurred_at.toISOString();
 
 	return {
 		idempotency_key: input.idempotency_key,
@@ -87,27 +83,14 @@ export async function sendAnalyticsEvent(params: {
 		(result.status !== "queued" && result.status !== "ignored") ||
 		(payload.tracking_enabled && result.status !== "queued")
 	) {
-		throw new Error(
-			"Analytics delivery did not confirm this event was accepted",
-		);
+		throw new Error("Analytics delivery did not confirm this event was accepted");
 	}
 	return result.status;
 }
 
-export type BatchStatus =
-	| "recorded"
-	| "duplicate"
-	| "ignored"
-	| "invalid"
-	| "conflict";
+export type BatchStatus = "recorded" | "duplicate" | "ignored" | "invalid" | "conflict";
 
-const batchStatuses = new Set<unknown>([
-	"recorded",
-	"duplicate",
-	"ignored",
-	"invalid",
-	"conflict",
-]);
+const batchStatuses = new Set<unknown>(["recorded", "duplicate", "ignored", "invalid", "conflict"]);
 
 /** `https://api.ndle.app/ingest` becomes `https://api.ndle.app/ingest/batch`. */
 export function batchEndpoint(endpoint: string): string {
@@ -162,12 +145,9 @@ export async function sendAnalyticsBatch(params: {
 			entry.index !== index ||
 			!batchStatuses.has(entry.status) ||
 			// Only an unreadable (invalid) event may come back without its key.
-			(key !== payload[index].idempotency_key &&
-				!(key === null && entry.status === "invalid"))
+			(key !== payload[index].idempotency_key && !(key === null && entry.status === "invalid"))
 		)
-			throw new Error(
-				"Analytics batch returned a result that does not match its event",
-			);
+			throw new Error("Analytics batch returned a result that does not match its event");
 		return entry.status as BatchStatus;
 	});
 }

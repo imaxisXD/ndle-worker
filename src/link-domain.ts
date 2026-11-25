@@ -41,9 +41,7 @@ function checkLinkDomain(params: {
 	const { domain } = params;
 	if (domain === undefined) return "legacy";
 	// null (default-domain link) and malformed values fail closed.
-	return typeof domain === "string" &&
-		host !== "" &&
-		normalizeHost(domain) === host
+	return typeof domain === "string" && host !== "" && normalizeHost(domain) === host
 		? "allowed"
 		: "denied";
 }

@@ -8,9 +8,7 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 
 const project = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const projectRequire = createRequire(join(project, "package.json"));
-const wranglerRequire = createRequire(
-	projectRequire.resolve("wrangler/package.json"),
-);
+const wranglerRequire = createRequire(projectRequire.resolve("wrangler/package.json"));
 const { build } = wranglerRequire("esbuild");
 const [command, sourceQueue, messageId, decisionFile] = process.argv.slice(2);
 if (!["inspect", "replay", "resolve", "resolve-invalid"].includes(command)) {
@@ -46,8 +44,7 @@ const bucket = {
 	async get(key) {
 		const response = await api(objectPath(key));
 		if (response.status === 404) return null;
-		if (!response.ok)
-			throw new Error(`R2 read failed (HTTP ${response.status})`);
+		if (!response.ok) throw new Error(`R2 read failed (HTTP ${response.status})`);
 		const text = await response.text();
 		return {
 			size: new TextEncoder().encode(text).length,
@@ -62,8 +59,7 @@ const bucket = {
 			headers: { "Content-Type": "application/json", "If-None-Match": "*" },
 		});
 		if (response.status === 412) return null;
-		if (!response.ok)
-			throw new Error(`R2 write failed (HTTP ${response.status})`);
+		if (!response.ok) throw new Error(`R2 write failed (HTTP ${response.status})`);
 		return {};
 	},
 	async delete(key) {
@@ -99,31 +95,23 @@ try {
 				bodySha256: archive.bodySha256,
 			}),
 		);
-		if (decisionFile)
-			await writeFile(resolve(decisionFile), text, { mode: 0o600, flag: "wx" });
+		if (decisionFile) await writeFile(resolve(decisionFile), text, { mode: 0o600, flag: "wx" });
 	} else if (command === "replay") {
 		const queueId = required("CLICK_EVENTS_QUEUE_ID");
 		const lookup = await api(`/queues/${encodeURIComponent(queueId)}`);
 		const queue = await lookup.json();
-		if (
-			!lookup.ok ||
-			queue.success !== true ||
-			queue.result?.queue_name !== mainQueue
-		)
+		if (!lookup.ok || queue.success !== true || queue.result?.queue_name !== mainQueue)
 			throw new Error("Main queue ID and name do not match");
 		const result = await recovery.replayFailedClick(key, bucket, {
 			async send(body) {
-				const response = await api(
-					`/queues/${encodeURIComponent(queueId)}/messages`,
-					{
-						method: "POST",
-						headers: { "Content-Type": "application/json" },
-						body: JSON.stringify({
-							body,
-							content_type: "json",
-						}),
-					},
-				);
+				const response = await api(`/queues/${encodeURIComponent(queueId)}/messages`, {
+					method: "POST",
+					headers: { "Content-Type": "application/json" },
+					body: JSON.stringify({
+						body,
+						content_type: "json",
+					}),
+				});
 				if (!response.ok || (await response.json()).success !== true)
 					throw new Error(
 						"Replay acceptance was not confirmed; retrying the unchanged event is safe",
@@ -151,15 +139,9 @@ try {
 		);
 	} else {
 		if (!decisionFile)
-			throw new Error(
-				"Supply a JSON decision file containing operator and reason",
-			);
+			throw new Error("Supply a JSON decision file containing operator and reason");
 		const decision = JSON.parse(await readFile(decisionFile, "utf8"));
-		console.log(
-			JSON.stringify(
-				await recovery.resolveInvalidFailedClick(key, bucket, decision),
-			),
-		);
+		console.log(JSON.stringify(await recovery.resolveInvalidFailedClick(key, bucket, decision)));
 	}
 } finally {
 	await rm(temporary, { recursive: true, force: true });

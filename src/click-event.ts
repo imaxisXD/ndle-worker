@@ -26,10 +26,7 @@ function clip<T extends string | null>(value: T, max: number): T {
 }
 
 /** Generate a session ID based on IP hash and user agent. */
-async function generateSessionId(
-	ipHash: string,
-	userAgent: string,
-): Promise<string> {
+async function generateSessionId(ipHash: string, userAgent: string): Promise<string> {
 	return (await sha256Hex(`${ipHash}-${userAgent}`)).slice(0, 16);
 }
 
@@ -70,8 +67,7 @@ export async function buildAnalyticsInput(params: {
 
 	const ua = analyzeUserAgent({
 		userAgent,
-		secChUa:
-			req.header("sec-ch-ua-full-version-list") ?? req.header("sec-ch-ua"),
+		secChUa: req.header("sec-ch-ua-full-version-list") ?? req.header("sec-ch-ua"),
 		secChUaPlatform: req.header("sec-ch-ua-platform"),
 		secChUaMobile: req.header("sec-ch-ua-mobile"),
 		cf,
@@ -83,48 +79,30 @@ export async function buildAnalyticsInput(params: {
 	const ipHash = await hashVisitorIp(ip, c.env.IP_HASH_SECRET);
 	const languageHeader = req.header("accept-language") ?? null;
 	const language = languageHeader
-		? clip(
-				languageHeader.split(",")[0]?.trim() || null,
-				visitorFieldLimits.language,
-			)
+		? clip(languageHeader.split(",")[0]?.trim() || null, visitorFieldLimits.language)
 		: null;
 
 	const sessionId = await generateSessionId(ipHash, userAgent);
-	const firstClickOfSession = await claimFirstClickOfSession(
-		c.env,
-		sessionId,
-		slug,
-		requestId,
-	);
+	const firstClickOfSession = await claimFirstClickOfSession(c.env, sessionId, slug, requestId);
 
 	const utm_source = clip(
-		requestUrl.searchParams.get("utm_source") ||
-			redisValue?.utm_params?.utm_source ||
-			null,
+		requestUrl.searchParams.get("utm_source") || redisValue?.utm_params?.utm_source || null,
 		visitorFieldLimits.utm,
 	);
 	const utm_medium = clip(
-		requestUrl.searchParams.get("utm_medium") ||
-			redisValue?.utm_params?.utm_medium ||
-			null,
+		requestUrl.searchParams.get("utm_medium") || redisValue?.utm_params?.utm_medium || null,
 		visitorFieldLimits.utm,
 	);
 	const utm_campaign = clip(
-		requestUrl.searchParams.get("utm_campaign") ||
-			redisValue?.utm_params?.utm_campaign ||
-			null,
+		requestUrl.searchParams.get("utm_campaign") || redisValue?.utm_params?.utm_campaign || null,
 		visitorFieldLimits.utm,
 	);
 	const utm_term = clip(
-		requestUrl.searchParams.get("utm_term") ||
-			redisValue?.utm_params?.utm_term ||
-			null,
+		requestUrl.searchParams.get("utm_term") || redisValue?.utm_params?.utm_term || null,
 		visitorFieldLimits.utm,
 	);
 	const utm_content = clip(
-		requestUrl.searchParams.get("utm_content") ||
-			redisValue?.utm_params?.utm_content ||
-			null,
+		requestUrl.searchParams.get("utm_content") || redisValue?.utm_params?.utm_content || null,
 		visitorFieldLimits.utm,
 	);
 

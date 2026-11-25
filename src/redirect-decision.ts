@@ -1,10 +1,7 @@
 import { resolveABTest } from "./ab-testing";
 import { sha256Hex } from "./crypto";
 import { type HeaderReader, readClientIp } from "./guards";
-import {
-	getRedirectBlockReason,
-	type RedirectBlockReason,
-} from "./redirect-safety";
+import { getRedirectBlockReason, type RedirectBlockReason } from "./redirect-safety";
 import type { RedisValueObject } from "./types";
 import { appendUtmParamsToUrl, assertSafeDestinationUrl } from "./url-safety";
 
@@ -21,10 +18,7 @@ type RedirectDecision =
 
 // A visitor (network and browser) keeps the same variant of a link, and each
 // link splits visitors independently of every other link's test.
-async function buildVariantSessionId(
-	linkId: string,
-	readHeader: HeaderReader,
-): Promise<string> {
+async function buildVariantSessionId(linkId: string, readHeader: HeaderReader): Promise<string> {
 	const userAgent = readHeader("user-agent") ?? "";
 	const ip = readClientIp(readHeader);
 	return sha256Hex(`${linkId}\n${ip}\n${userAgent}`);
@@ -53,10 +47,7 @@ async function decideRedirect(params: {
 	const abConfig = link.rules?.ab_test;
 
 	if (abConfig?.enabled && abConfig.variants?.length) {
-		const sessionId = await buildVariantSessionId(
-			link.link_id ?? "",
-			readHeader,
-		);
+		const sessionId = await buildVariantSessionId(link.link_id ?? "", readHeader);
 		const result = resolveABTest(abConfig, sessionId);
 		if (result) {
 			try {

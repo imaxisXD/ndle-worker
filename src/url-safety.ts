@@ -41,11 +41,7 @@ function ipv6Groups(hostname: string): number[] | null {
 	const tail = halves.length === 2 && halves[1] ? halves[1].split(":") : [];
 	const missing = 8 - head.length - tail.length;
 	if (halves.length === 1 ? missing !== 0 : missing < 1) return null;
-	const groups = [
-		...head,
-		...Array(halves.length === 2 ? missing : 0).fill("0"),
-		...tail,
-	];
+	const groups = [...head, ...Array(halves.length === 2 ? missing : 0).fill("0"), ...tail];
 	if (!groups.every((group) => ipv6GroupRegex.test(group))) return null;
 	return groups.map((group) => Number.parseInt(group, 16));
 }
@@ -59,12 +55,7 @@ function isPrivateIpv6(hostname: string): boolean {
 	// IPv4-mapped (::ffff:a.b.c.d) and IPv4-compatible (::a.b.c.d) forms.
 	if (leadingZeros && (groups[5] === 0xffff || groups[5] === 0)) {
 		if (groups[5] === 0 && groups[6] === 0 && groups[7] <= 1) return true; // :: and ::1
-		const ipv4 = [
-			groups[6] >> 8,
-			groups[6] & 0xff,
-			groups[7] >> 8,
-			groups[7] & 0xff,
-		];
+		const ipv4 = [groups[6] >> 8, groups[6] & 0xff, groups[7] >> 8, groups[7] & 0xff];
 		return isPrivateIpv4(ipv4.join("."));
 	}
 	return (
@@ -103,10 +94,7 @@ export function assertSafeDestinationUrl(input: string | URL): URL {
  * Append UTM parameters from Redis to the destination URL without overwriting
  * existing params. Clones the URL only if at least one parameter is added.
  */
-export function appendUtmParamsToUrl(
-	destinationUrl: URL,
-	utmParams: Record<string, string>,
-): URL {
+export function appendUtmParamsToUrl(destinationUrl: URL, utmParams: Record<string, string>): URL {
 	let url: URL | null = null;
 	for (const [key, value] of Object.entries(utmParams)) {
 		if (value && !(url ?? destinationUrl).searchParams.has(key)) {

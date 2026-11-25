@@ -1,8 +1,4 @@
-import {
-	type BatchStatus,
-	sendAnalyticsBatch,
-	sendAnalyticsEvent,
-} from "./analytics";
+import { type BatchStatus, sendAnalyticsBatch, sendAnalyticsEvent } from "./analytics";
 import { parseQueuedClick } from "./click-envelope";
 import { mutateRecordClick } from "./convex-api";
 import { archiveFailedClick } from "./failed-clicks";
@@ -35,10 +31,7 @@ function deliverySettings(env: Bindings) {
 type DeliverySettings = ReturnType<typeof deliverySettings>;
 
 // Runs after ingest has committed the click.
-async function recordLiveClick(
-	event: AnalyticsEvent,
-	settings: DeliverySettings,
-): Promise<string> {
+async function recordLiveClick(event: AnalyticsEvent, settings: DeliverySettings): Promise<string> {
 	if (event.is_bot) return "bot_recorded";
 	if (!event.link_id) throw new Error("Click event is missing its link ID");
 	const result = await mutateRecordClick({
@@ -75,10 +68,7 @@ async function recordLiveClick(
  * Deliver one click through the single-event ingest route, then Convex.
  * Used by operator recovery (`resolveFailedClick`).
  */
-export async function deliverClick(
-	event: AnalyticsEvent,
-	env: Bindings,
-): Promise<string> {
+export async function deliverClick(event: AnalyticsEvent, env: Bindings): Promise<string> {
 	if (!event.tracking_enabled) return "tracking_disabled";
 	const settings = deliverySettings(env);
 	await sendAnalyticsEvent({
@@ -115,19 +105,12 @@ async function forEachLimited<T>(
 
 type TrackedClick = { message: Message<unknown>; event: AnalyticsEvent };
 
-export async function consumeClicks(
-	batch: MessageBatch<unknown>,
-	env: Bindings,
-): Promise<void> {
+export async function consumeClicks(batch: MessageBatch<unknown>, env: Bindings): Promise<void> {
 	const log = createLogger(env.LOG_LEVEL, {
 		component: "click_delivery",
 		queue: batch.queue,
 	});
-	const retry = (
-		message: Message<unknown>,
-		requestId: string | undefined,
-		error: unknown,
-	) => {
+	const retry = (message: Message<unknown>, requestId: string | undefined, error: unknown) => {
 		log.error("Click delivery will be retried", {
 			request_id: requestId,
 			message_id: message.id,
@@ -136,10 +119,7 @@ export async function consumeClicks(
 		});
 		message.retry({ delaySeconds: retryDelay(message.attempts) });
 	};
-	const settle = async (
-		{ message, event }: TrackedClick,
-		work: () => Promise<string>,
-	) => {
+	const settle = async ({ message, event }: TrackedClick, work: () => Promise<string>) => {
 		try {
 			const outcome = await work();
 			message.ack();
@@ -154,12 +134,7 @@ export async function consumeClicks(
 	};
 	const archiveInvalid = async (message: Message<unknown>) => {
 		try {
-			await archiveFailedClick(
-				message,
-				batch.queue,
-				env.FAILED_CLICK_ARCHIVES,
-				"invalid_event",
-			);
+			await archiveFailedClick(message, batch.queue, env.FAILED_CLICK_ARCHIVES, "invalid_event");
 			message.ack();
 			log.error("Invalid click archived for investigation", {
 				message_id: message.id,
@@ -174,8 +149,7 @@ export async function consumeClicks(
 		try {
 			settings = deliverySettings(env);
 		} catch (error) {
-			for (const { message, event } of clicks)
-				retry(message, event.idempotency_key, error);
+			for (const { message, event } of clicks) retry(message, event.idempotency_key, error);
 			return;
 		}
 		const writes: Array<[TrackedClick, () => Promise<string>]> = [];
@@ -193,8 +167,7 @@ export async function consumeClicks(
 					});
 				} catch (error) {
 					// Nothing in a failed batch request can be assumed saved.
-					for (const { message, event } of group)
-						retry(message, event.idempotency_key, error);
+					for (const { message, event } of group) retry(message, event.idempotency_key, error);
 					return;
 				}
 				group.forEach((click, index) => {
@@ -202,11 +175,7 @@ export async function consumeClicks(
 					// Only tracked clicks are sent, so "ignored" is as unexpected as a
 					// rejection. Like a rejected single-event request, retries end in
 					// the failed-click queue and its archive.
-					if (
-						status === "invalid" ||
-						status === "conflict" ||
-						status === "ignored"
-					) {
+					if (status === "invalid" || status === "conflict" || status === "ignored") {
 						retry(
 							click.message,
 							click.event.idempotency_key,
@@ -218,9 +187,7 @@ export async function consumeClicks(
 				});
 			}),
 		);
-		await forEachLimited(writes, maxConvexWrites, ([click, work]) =>
-			settle(click, work),
-		);
+		await forEachLimited(writes, maxConvexWrites, ([click, work]) => settle(click, work));
 	};
 
 	const tracked: TrackedClick[] = [];
@@ -234,8 +201,7 @@ export async function consumeClicks(
 			continue;
 		}
 		if (event.tracking_enabled) tracked.push({ message, event });
-		else
-			settled.push(settle({ message, event }, async () => "tracking_disabled"));
+		else settled.push(settle({ message, event }, async () => "tracking_disabled"));
 	}
 	settled.push(deliverTracked(tracked));
 	await Promise.all(settled);

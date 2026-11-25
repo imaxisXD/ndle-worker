@@ -48,8 +48,7 @@ type Playbook = {
 
 const clearsItself =
 	"This often happens for a few minutes after deploying the redirect Worker or restarting the analytics service. If an all-clear email arrives within about 10 minutes, nothing needs doing.";
-const nextCheck =
-	"The next check, within 5 minutes, sends an all-clear email once this passes.";
+const nextCheck = "The next check, within 5 minutes, sends an all-clear email once this passes.";
 /** Checks run 5 minutes apart; the slack allows for Cloudflare's timing. */
 const nextCheckWait = 4 * 60_000;
 /** Link monitoring can be slow for a moment without being down. */
@@ -80,8 +79,7 @@ export const issuePlaybooks = {
 			`Open Cloudflare → Queues → ndle-click-events (${links.cloudflareQueues}). The Backlog number should be going down.`,
 			`If the backlog is still growing after 30 minutes, open the redirect Worker's logs (${links.cloudflareWorker} → Logs) and search for "Click delivery will be retried" to see why.`,
 		],
-		fixed:
-			"The next check sends an all-clear email once no click has waited more than 5 minutes.",
+		fixed: "The next check sends an all-clear email once no click has waited more than 5 minutes.",
 	},
 	click_queue_large: {
 		area: "Clicks",
@@ -94,8 +92,7 @@ export const issuePlaybooks = {
 			analyticsSteps(links, [
 				`Open Cloudflare → Queues → ndle-click-events (${links.cloudflareQueues}) and watch the Backlog fall once the service is healthy.`,
 			]),
-		fixed:
-			"The next check sends an all-clear email once the backlog is back under the limit.",
+		fixed: "The next check sends an all-clear email once the backlog is back under the limit.",
 	},
 	click_queue_unavailable: {
 		area: "Clicks",
@@ -161,15 +158,13 @@ export const issuePlaybooks = {
 				'"resolve" confirms the click is saved and then clears the reminder. If it refuses, keep the files and ask for help rather than deleting them.',
 			];
 		},
-		fixed:
-			"When every saved click is resolved, the next check sends an all-clear email.",
+		fixed: "When every saved click is resolved, the next check sends an all-clear email.",
 	},
 	failed_archive_unavailable: {
 		area: "Failed clicks",
 		title: "Could not check the saved failed clicks in R2",
 		urgency: "soon",
-		meaning:
-			"The check could not list the failed-click records in the R2 bucket.",
+		meaning: "The check could not list the failed-click records in the R2 bucket.",
 		lost: "No sign of it.",
 		alertAfter: logOnly,
 		steps: ({ links }) => [
@@ -367,17 +362,14 @@ export function alertAfter(issue: Issue): number {
 }
 
 function formatTime(instant: number, timeZone: string): string {
-	const local = new Intl.DateTimeFormat(
-		timeZone === "Asia/Kolkata" ? "en-IN" : "en-US",
-		{
-			timeZone,
-			day: "numeric",
-			month: "short",
-			hour: "numeric",
-			minute: "2-digit",
-			timeZoneName: "short",
-		},
-	).format(instant);
+	const local = new Intl.DateTimeFormat(timeZone === "Asia/Kolkata" ? "en-IN" : "en-US", {
+		timeZone,
+		day: "numeric",
+		month: "short",
+		hour: "numeric",
+		minute: "2-digit",
+		timeZoneName: "short",
+	}).format(instant);
 	const utc = new Date(instant).toISOString().slice(11, 16);
 	return timeZone === "UTC" ? `${local}` : `${local} (${utc} UTC)`;
 }
@@ -451,16 +443,10 @@ function htmlText(value: string): string {
 	);
 }
 
-function renderText(
-	title: string,
-	intro: string[],
-	sections: Section[],
-): string {
+function renderText(title: string, intro: string[], sections: Section[]): string {
 	const parts = [title, ...intro, ""];
 	sections.forEach((section, index) => {
-		parts.push(
-			`${index + 1}. ${section.heading} [${urgencyLabel[section.urgency]}]`,
-		);
+		parts.push(`${index + 1}. ${section.heading} [${urgencyLabel[section.urgency]}]`);
 		for (const [label, value] of section.lines)
 			parts.push(`   ${label}${label.endsWith("?") ? "" : ":"} ${value}`);
 		parts.push("   What to do:");
@@ -473,11 +459,7 @@ function renderText(
 	return parts.join("\n");
 }
 
-function renderHtml(
-	title: string,
-	intro: string[],
-	sections: Section[],
-): string {
+function renderHtml(title: string, intro: string[], sections: Section[]): string {
 	const cards = sections
 		.map((section, index) => {
 			const color = section.urgency === "urgent" ? "#b91c1c" : "#b45309";
@@ -505,9 +487,7 @@ ${note}
 		})
 		.join("");
 	const introHtml = intro
-		.map(
-			(line) => `<p style="margin:0 0 8px;color:#334155">${htmlText(line)}</p>`,
-		)
+		.map((line) => `<p style="margin:0 0 8px;color:#334155">${htmlText(line)}</p>`)
 		.join("");
 	return `<div style="font-family:-apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif;font-size:14px;line-height:1.5;color:#0f172a;max-width:640px">
 <h1 style="font-size:20px;margin:0 0 8px">${escapeHtml(title)}</h1>
@@ -521,13 +501,10 @@ export function buildAlertEmail(issues: Issue[], context: AlertContext) {
 	const unique = [...new Set(issues)].sort(
 		(left, right) =>
 			Number(issuePlaybooks[left].urgency !== "urgent") -
-				Number(issuePlaybooks[right].urgency !== "urgent") ||
-			left.localeCompare(right),
+				Number(issuePlaybooks[right].urgency !== "urgent") || left.localeCompare(right),
 	);
 	const sections = problemSections(unique, context);
-	const urgent = unique.some(
-		(issue) => issuePlaybooks[issue].urgency === "urgent",
-	);
+	const urgent = unique.some((issue) => issuePlaybooks[issue].urgency === "urgent");
 	const first = issuePlaybooks[unique[0]].title;
 	const more = unique.length > 1 ? ` (+${unique.length - 1} more)` : "";
 	const title = `NDLE: ${unique.length} problem${unique.length === 1 ? "" : "s"} found`;
@@ -557,13 +534,7 @@ export function buildAllClearEmail(resolved: Issue[], context: AlertContext) {
 		`Every check passed at ${formatTime(context.now, context.timeZone)}. Nothing more to do.`,
 		"Resolved:",
 	];
-	const text = [
-		title,
-		...intro,
-		...lines.map((line) => `- ${line}`),
-		"",
-		footer,
-	].join("\n");
+	const text = [title, ...intro, ...lines.map((line) => `- ${line}`), "", footer].join("\n");
 	const html = `<div style="font-family:-apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif;font-size:14px;line-height:1.5;color:#0f172a;max-width:640px">
 <h1 style="font-size:20px;margin:0 0 8px;color:#15803d">${escapeHtml(title)}</h1>
 <p style="margin:0 0 8px">${htmlText(intro[0])}</p>

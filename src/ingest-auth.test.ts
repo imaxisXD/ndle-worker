@@ -12,15 +12,9 @@ test("scoped ingest secrets are preferred over API_SECRET", () => {
 });
 
 test("an unset or empty scoped secret falls back to API_SECRET", () => {
-	expect(ingestWriteSecret({ API_SECRET: "shared", OPS_SECRET: "ops" })).toBe(
-		"shared",
-	);
-	expect(
-		opsSecret({ API_SECRET: "shared", INGEST_WRITE_SECRET: "write" }),
-	).toBe("shared");
-	expect(
-		ingestWriteSecret({ API_SECRET: "shared", INGEST_WRITE_SECRET: "" }),
-	).toBe("shared");
+	expect(ingestWriteSecret({ API_SECRET: "shared", OPS_SECRET: "ops" })).toBe("shared");
+	expect(opsSecret({ API_SECRET: "shared", INGEST_WRITE_SECRET: "write" })).toBe("shared");
+	expect(ingestWriteSecret({ API_SECRET: "shared", INGEST_WRITE_SECRET: "" })).toBe("shared");
 	expect(opsSecret({ API_SECRET: "shared", OPS_SECRET: "" })).toBe("shared");
 });
 

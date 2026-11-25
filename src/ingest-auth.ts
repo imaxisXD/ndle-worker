@@ -1,8 +1,6 @@
 import type { Bindings } from "./types";
 
-type IngestSecrets = Partial<
-	Pick<Bindings, "API_SECRET" | "INGEST_WRITE_SECRET" | "OPS_SECRET">
->;
+type IngestSecrets = Partial<Pick<Bindings, "API_SECRET" | "INGEST_WRITE_SECRET" | "OPS_SECRET">>;
 
 // Each scoped secret falls back to the legacy shared API_SECRET, so a deploy
 // without the new secrets keeps working until ingest stops accepting it.

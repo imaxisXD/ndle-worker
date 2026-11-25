@@ -94,9 +94,7 @@ test("uses a safe A/B variant", async () => {
 				ab_test: {
 					enabled: true,
 					distribution: "deterministic",
-					variants: [
-						{ id: "variant_1", url: "https://variant.example", weight: 100 },
-					],
+					variants: [{ id: "variant_1", url: "https://variant.example", weight: 100 }],
 				},
 			},
 		},
@@ -118,9 +116,7 @@ test("falls back when an A/B variant is unsafe", async () => {
 				ab_test: {
 					enabled: true,
 					distribution: "deterministic",
-					variants: [
-						{ id: "variant_1", url: "javascript:alert(1)", weight: 100 },
-					],
+					variants: [{ id: "variant_1", url: "javascript:alert(1)", weight: 100 }],
 				},
 			},
 		},
@@ -157,11 +153,7 @@ async function assignedVariant(
 	const decision = await decideRedirect({
 		redisValue: link,
 		readHeader: (name) =>
-			name === "cf-connecting-ip"
-				? ip
-				: name === "user-agent"
-					? userAgent
-					: undefined,
+			name === "cf-connecting-ip" ? ip : name === "user-agent" ? userAgent : undefined,
 	});
 	return decision.kind === "redirect" ? decision.variantId : null;
 }
@@ -178,11 +170,7 @@ test("visitors sharing one network are split across A/B variants", async () => {
 	const link = splitTest("link_office");
 	let control = 0;
 	for (let visitor = 0; visitor < 400; visitor++) {
-		const variant = await assignedVariant(
-			link,
-			"198.51.100.20",
-			`Mozilla/5.0 browser-${visitor}`,
-		);
+		const variant = await assignedVariant(link, "198.51.100.20", `Mozilla/5.0 browser-${visitor}`);
 		if (variant === "control") control++;
 	}
 	assert.ok(control > 150 && control < 250, `control got ${control} of 400`);

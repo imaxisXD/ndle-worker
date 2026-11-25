@@ -123,10 +123,7 @@ app.get("/:websiteSlug{[A-Za-z0-9_-]+}", async (c) => {
 	return buildClientRedirectResponse(decision.destination);
 });
 
-function runAfterResponse(
-	c: Context<{ Bindings: Bindings }>,
-	work: Promise<void>,
-) {
+function runAfterResponse(c: Context<{ Bindings: Bindings }>, work: Promise<void>) {
 	try {
 		c.executionCtx.waitUntil(work);
 	} catch {

@@ -22,17 +22,15 @@ const baseArgs = {
 test("posts convex_encoded_json to /api/mutation, strips undefined, and returns value", async () => {
 	let capturedUrl = "";
 	let capturedInit: RequestInit | undefined;
-	const fetchImpl = mock(
-		async (input: RequestInfo | URL, init?: RequestInit) => {
-			capturedUrl = String(input);
-			capturedInit = init;
-			return Response.json({
-				status: "success",
-				value: { outcome: "recorded" },
-				logLines: [],
-			});
-		},
-	) as unknown as typeof fetch;
+	const fetchImpl = mock(async (input: RequestInfo | URL, init?: RequestInit) => {
+		capturedUrl = String(input);
+		capturedInit = init;
+		return Response.json({
+			status: "success",
+			value: { outcome: "recorded" },
+			logLines: [],
+		});
+	}) as unknown as typeof fetch;
 
 	const result = await mutateRecordClick({
 		convexUrl: "https://example.convex.cloud",
@@ -70,10 +68,7 @@ test("posts convex_encoded_json to /api/mutation, strips undefined, and returns 
 test("handles HTTP 560 UDF errors and HTTP 200 error payloads", async () => {
 	for (const status of [560, 200]) {
 		const fetchImpl = mock(async () =>
-			Response.json(
-				{ status: "error", errorMessage: `UDF error (${status})` },
-				{ status },
-			),
+			Response.json({ status: "error", errorMessage: `UDF error (${status})` }, { status }),
 		) as unknown as typeof fetch;
 		await expect(
 			mutateRecordClick({
@@ -110,9 +105,7 @@ test("cancels response body and throws on non-OK HTTP statuses", async () => {
 
 test("throws on malformed or unknown-status responses", async () => {
 	for (const payload of [null, "ok", { status: "mystery" }]) {
-		const fetchImpl = mock(async () =>
-			Response.json(payload),
-		) as unknown as typeof fetch;
+		const fetchImpl = mock(async () => Response.json(payload)) as unknown as typeof fetch;
 		await expect(
 			mutateRecordClick({
 				convexUrl: "https://example.convex.cloud",

@@ -9,13 +9,9 @@ export function readClientIp(readHeader: HeaderReader): string {
 }
 
 /** Normalize common boolean env var strings to boolean with a default. */
-export function getBooleanEnv(
-	value: string | undefined,
-	defaultValue: boolean,
-): boolean {
+export function getBooleanEnv(value: string | undefined, defaultValue: boolean): boolean {
 	if (value === undefined) return defaultValue;
 	const normalized = value.trim().toLowerCase();
-	if (normalized === "false" || normalized === "0" || normalized === "no")
-		return false;
+	if (normalized === "false" || normalized === "0" || normalized === "no") return false;
 	return true;
 }

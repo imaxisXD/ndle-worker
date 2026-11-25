@@ -44,9 +44,7 @@ const knownBrowserOrder = [
 	"Samsung Internet",
 ] as const;
 
-const browserBrandRules: ReadonlyArray<
-	[RegExp, (typeof knownBrowserOrder)[number]]
-> = [
+const browserBrandRules: ReadonlyArray<[RegExp, (typeof knownBrowserOrder)[number]]> = [
 	[/brave/i, "Brave"],
 	[/edge/i, "Edge"],
 	[/opera/i, "Opera"],
@@ -86,17 +84,12 @@ function detectDeviceType(
 	return "desktop";
 }
 
-function detectOS(
-	userAgent: string,
-	lowerUa: string,
-	secChUaPlatform?: string | null,
-): string {
+function detectOS(userAgent: string, lowerUa: string, secChUaPlatform?: string | null): string {
 	// Prefer recognized Client Hints; map unrecognized hints via UA fallback / "Other"
 	// so arbitrary visitor-controlled text never enters the OS dimension.
 	const platform = (secChUaPlatform ?? "").replace(quotesRegex, "").trim();
 	const normalizedPlatform = platform.toLowerCase();
-	const hasPlatformHint =
-		normalizedPlatform !== "" && normalizedPlatform !== "unknown";
+	const hasPlatformHint = normalizedPlatform !== "" && normalizedPlatform !== "unknown";
 	if (hasPlatformHint) {
 		const known = knownPlatforms[normalizedPlatform];
 		if (known) return known;
@@ -131,11 +124,7 @@ function detectOS(
 	return hasPlatformHint ? "Other" : "Unknown";
 }
 
-function detectBrowser(
-	userAgent: string,
-	lowerUa: string,
-	secChUa?: string | null,
-): string {
+function detectBrowser(userAgent: string, lowerUa: string, secChUa?: string | null): string {
 	// 1) Parse recognized brands from UA Client Hints; map unrecognized hints via
 	// UA fallback / "Other" so arbitrary visitor text never enters the browser dimension.
 	const header = (secChUa ?? "").trim();
@@ -170,18 +159,13 @@ function detectBrowser(
 		if (lowerUa.includes("chrome/")) return "Chrome";
 		if (lowerUa.includes("safari/")) return "Safari";
 		if (lowerUa.includes("firefox/")) return "Firefox";
-		if (lowerUa.includes("msie") || lowerUa.includes("trident/"))
-			return "Internet Explorer";
+		if (lowerUa.includes("msie") || lowerUa.includes("trident/")) return "Internet Explorer";
 	}
 
 	return hasUnrecognizedBrand ? "Other" : "Unknown";
 }
 
-function detectBot(
-	userAgent: string,
-	lowerUa: string,
-	cf?: BotManagement,
-): boolean {
+function detectBot(userAgent: string, lowerUa: string, cf?: BotManagement): boolean {
 	try {
 		const bm = cf?.botManagement;
 		if (bm) {
@@ -217,18 +201,12 @@ export function isAutomaticFetch(readHeader: HeaderReader): boolean {
 }
 
 /** Coarse device type using UA-CH mobile hint first, else UA buckets. */
-export function getDeviceType(
-	userAgent: string,
-	secChUaMobile?: string | null,
-): string {
+export function getDeviceType(userAgent: string, secChUaMobile?: string | null): string {
 	return detectDeviceType(userAgent, userAgent.toLowerCase(), secChUaMobile);
 }
 
 /** Determine operating system using Client Hints when available, else UA parsing. */
-export function getOS(
-	userAgent: string,
-	secChUaPlatform?: string | null,
-): string {
+export function getOS(userAgent: string, secChUaPlatform?: string | null): string {
 	return detectOS(userAgent, userAgent.toLowerCase(), secChUaPlatform);
 }
 
@@ -262,8 +240,6 @@ export function analyzeUserAgent(params: {
 		deviceType: detectDeviceType(userAgent, lowerUa, params.secChUaMobile),
 		browser: detectBrowser(userAgent, lowerUa, params.secChUa),
 		os: detectOS(userAgent, lowerUa, params.secChUaPlatform),
-		isBot:
-			detectBot(userAgent, lowerUa, params.cf) ||
-			isAutomaticFetch(params.readHeader),
+		isBot: detectBot(userAgent, lowerUa, params.cf) || isAutomaticFetch(params.readHeader),
 	};
 }

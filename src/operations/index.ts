@@ -38,8 +38,7 @@ const defaultLinks: AlertLinks = {
 	monitorReady: "https://monitor.ndle.app/ready",
 	coolify: "https://coolify.superlinkify.com/",
 	cloudflareQueues: "https://dash.cloudflare.com/?to=/:account/workers/queues",
-	cloudflareR2:
-		"https://dash.cloudflare.com/?to=/:account/r2/default/buckets/ndle-analytics",
+	cloudflareR2: "https://dash.cloudflare.com/?to=/:account/r2/default/buckets/ndle-analytics",
 	cloudflareWorker:
 		"https://dash.cloudflare.com/?to=/:account/workers/services/view/ndleworker/production",
 	cloudflareStatus: "https://www.cloudflarestatus.com/",
@@ -66,11 +65,7 @@ function alertKey(issues: Issue[], now: number): string {
 	return `ndle-operations/${Math.floor(now / hour)}/${[...new Set(issues)].sort().join("-")}`;
 }
 
-export function buildAlert(
-	issues: Issue[],
-	now: number,
-	context: Partial<AlertContext> = {},
-) {
+export function buildAlert(issues: Issue[], now: number, context: Partial<AlertContext> = {}) {
 	return {
 		key: alertKey(issues, now),
 		...buildAlertEmail(issues, {
@@ -202,13 +197,8 @@ export async function checkOperations(
 		previous.issues.length === due.length &&
 		due.every((issue) => previous.issues.includes(issue));
 	// An unchanged set of problems is repeated at most once an hour.
-	if (
-		sameProblems &&
-		previous.alertedAt !== undefined &&
-		now - previous.alertedAt < hour
-	) {
-		if (!sameFirstSeen(previous, waiting.firstSeen))
-			await writeAlertState(env, waiting, log);
+	if (sameProblems && previous.alertedAt !== undefined && now - previous.alertedAt < hour) {
+		if (!sameFirstSeen(previous, waiting.firstSeen)) await writeAlertState(env, waiting, log);
 		return;
 	}
 	let email: ReturnType<typeof buildAlertEmail>;

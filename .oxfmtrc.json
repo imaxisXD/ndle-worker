@@ -1,0 +1,13 @@
+{
+	"$schema": "./node_modules/oxfmt/configuration_schema.json",
+	"useTabs": true,
+	"singleQuote": false,
+	"semi": true,
+	"ignorePatterns": [
+		"worker-configuration.d.ts",
+		"pnpm-lock.yaml",
+		"dist/**",
+		"build/**",
+		"coverage/**"
+	]
+}

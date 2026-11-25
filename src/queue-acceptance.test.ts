@@ -7,18 +7,12 @@ afterEach(() => mock.restore());
 
 function setup(trackingEnabled = true) {
 	const sessionKeys = new Set<string>();
-	const set = mock(
-		async (
-			key: string,
-			_value: string,
-			options: { nx: boolean; ex: number },
-		) => {
-			expect(options).toEqual({ nx: true, ex: 1800 });
-			if (sessionKeys.has(key)) return null;
-			sessionKeys.add(key);
-			return "OK";
-		},
-	);
+	const set = mock(async (key: string, _value: string, options: { nx: boolean; ex: number }) => {
+		expect(options).toEqual({ nx: true, ex: 1800 });
+		if (sessionKeys.has(key)) return null;
+		sessionKeys.add(key);
+		return "OK";
+	});
 	spyOn(Redis, "fromEnv").mockReturnValue({
 		json: {
 			get: async () => ({
@@ -62,13 +56,8 @@ test("a tracked redirect normally waits for queue acceptance", async () => {
 function memoryBucket() {
 	const objects = new Map<string, string>();
 	const bucket = {
-		async put(
-			key: string,
-			value: string,
-			options?: { onlyIf?: { etagDoesNotMatch?: string } },
-		) {
-			if (options?.onlyIf?.etagDoesNotMatch === "*" && objects.has(key))
-				return null;
+		async put(key: string, value: string, options?: { onlyIf?: { etagDoesNotMatch?: string } }) {
+			if (options?.onlyIf?.etagDoesNotMatch === "*" && objects.has(key)) return null;
 			objects.set(key, value);
 			return {};
 		},
@@ -120,9 +109,7 @@ test("a queue outage still redirects and keeps the click for replay", async () =
 	expect(markerKey).toMatch(/^failed-clicks\/v1\/unresolved\//);
 	const archive = JSON.parse(objects.get(archiveKey) ?? "null");
 	expect(archive.reason).toBe("delivery_failed");
-	expect(JSON.parse(archive.body.data).event.idempotency_key).toBe(
-		archive.eventId,
-	);
+	expect(JSON.parse(archive.body.data).event.idempotency_key).toBe(archive.eventId);
 });
 
 test("a queue that recovers during the retry needs no archive", async () => {
@@ -179,11 +166,7 @@ test("an unavailable session store records the click without a first-session fla
 	const send = mock(async (body: QueuedClick) => {
 		events.push(body);
 	});
-	const response = await app.request(
-		"https://ndle.test/test",
-		{},
-		{ CLICK_EVENTS: { send } },
-	);
+	const response = await app.request("https://ndle.test/test", {}, { CLICK_EVENTS: { send } });
 	expect(response.status).toBe(302);
 	expect(events).toHaveLength(1);
 	expect(events[0].event.first_click_of_session).toBe(false);
@@ -202,11 +185,7 @@ test("a link record that cannot produce a valid event still redirects", async ()
 		set: async () => "OK",
 	} as unknown as Redis);
 	const send = mock(async () => {});
-	const response = await app.request(
-		"https://ndle.test/test",
-		{},
-		{ CLICK_EVENTS: { send } },
-	);
+	const response = await app.request("https://ndle.test/test", {}, { CLICK_EVENTS: { send } });
 	expect(response.status).toBe(302);
 	expect(send).not.toHaveBeenCalled();
 });
@@ -268,23 +247,15 @@ test("simultaneous clicks claim one first-session marker and have distinct event
 			),
 		),
 	);
-	expect(
-		events.map(({ event }) => event.first_click_of_session).sort(),
-	).toEqual([false, true]);
-	expect(new Set(events.map(({ event }) => event.idempotency_key)).size).toBe(
-		2,
-	);
-	for (const { event } of events)
-		expect(event.request_id).toBe(event.idempotency_key);
+	expect(events.map(({ event }) => event.first_click_of_session).sort()).toEqual([false, true]);
+	expect(new Set(events.map(({ event }) => event.idempotency_key)).size).toBe(2);
+	for (const { event } of events) expect(event.request_id).toBe(event.idempotency_key);
 });
 
 const encode = (value: string) => new TextEncoder().encode(value);
 const hex = (buffer: ArrayBuffer) =>
-	[...new Uint8Array(buffer)]
-		.map((byte) => byte.toString(16).padStart(2, "0"))
-		.join("");
-const sha256 = async (value: string) =>
-	hex(await crypto.subtle.digest("SHA-256", encode(value)));
+	[...new Uint8Array(buffer)].map((byte) => byte.toString(16).padStart(2, "0")).join("");
+const sha256 = async (value: string) => hex(await crypto.subtle.digest("SHA-256", encode(value)));
 
 async function visitorEvent(env: Record<string, unknown>) {
 	setup();
@@ -306,18 +277,12 @@ test("without IP_HASH_SECRET the visitor hash and session stay unchanged", async
 	for (const env of [{}, { IP_HASH_SECRET: "" }]) {
 		const event = await visitorEvent(env);
 		expect(event.ip_hash).toBe(await sha256("203.0.113.1"));
-		expect(event.session_id).toBe(
-			(await sha256(`${event.ip_hash}-browser`)).substring(0, 16),
-		);
+		expect(event.session_id).toBe((await sha256(`${event.ip_hash}-browser`)).substring(0, 16));
 	}
 });
 
 test("IP_HASH_SECRET keys the visitor hash and the session derived from it", async () => {
-	for (const secret of [
-		"first-test-key",
-		"second-test-key",
-		"first-test-key",
-	]) {
+	for (const secret of ["first-test-key", "second-test-key", "first-test-key"]) {
 		const key = await crypto.subtle.importKey(
 			"raw",
 			encode(secret),
@@ -325,15 +290,11 @@ test("IP_HASH_SECRET keys the visitor hash and the session derived from it", asy
 			false,
 			["sign"],
 		);
-		const expected = hex(
-			await crypto.subtle.sign("HMAC", key, encode("203.0.113.1")),
-		);
+		const expected = hex(await crypto.subtle.sign("HMAC", key, encode("203.0.113.1")));
 		const event = await visitorEvent({ IP_HASH_SECRET: secret });
 		expect(event.ip_hash).toBe(expected);
 		expect(event.ip_hash).not.toBe(await sha256("203.0.113.1"));
-		expect(event.session_id).toBe(
-			(await sha256(`${expected}-browser`)).substring(0, 16),
-		);
+		expect(event.session_id).toBe((await sha256(`${expected}-browser`)).substring(0, 16));
 	}
 });
 
@@ -364,10 +325,6 @@ test("prefetch and prerender requests are recorded as bots", async () => {
 		{ "user-agent": browser, "sec-purpose": "prefetch;prerender" },
 		{ "user-agent": browser, purpose: "prefetch" },
 	])
-		await app.request(
-			"https://ndle.test/test",
-			{ headers },
-			{ CLICK_EVENTS: { send } },
-		);
+		await app.request("https://ndle.test/test", { headers }, { CLICK_EVENTS: { send } });
 	expect(events.map(({ event }) => event.is_bot)).toEqual([false, true, true]);
 });

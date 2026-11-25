@@ -1,8 +1,4 @@
-import {
-	describeDuration,
-	type FailedClickRef,
-	type Issue,
-} from "../alert-email";
+import { describeDuration, type FailedClickRef, type Issue } from "../alert-email";
 import { unresolvedClickPrefix } from "../failed-clicks";
 import { isRecord } from "../guards";
 import { opsSecret } from "../ingest-auth";
@@ -75,10 +71,7 @@ export async function readJson(response: Response): Promise<unknown> {
 	return JSON.parse(textDecoder.decode(data));
 }
 
-export async function withDeadline<T>(
-	check: () => Promise<T>,
-	timeoutMs: number,
-): Promise<T> {
+export async function withDeadline<T>(check: () => Promise<T>, timeoutMs: number): Promise<T> {
 	let timer: ReturnType<typeof setTimeout> | undefined;
 	try {
 		return await Promise.race([
@@ -102,10 +95,8 @@ export function checkClickQueue(metrics: QueueMetrics, now: number): Issue[] {
 	const issues: Issue[] = [];
 	// Published docs and generated types differ here; accept either timestamp form.
 	const oldest = Number(metrics.oldestMessageTimestamp);
-	if (waiting > 0 && oldest > 0 && now - oldest > 5 * minute)
-		issues.push("click_queue_old");
-	if (waiting > 10_000 || bytes > 100 * 1024 * 1024)
-		issues.push("click_queue_large");
+	if (waiting > 0 && oldest > 0 && now - oldest > 5 * minute) issues.push("click_queue_old");
+	if (waiting > 10_000 || bytes > 100 * 1024 * 1024) issues.push("click_queue_large");
 	return issues;
 }
 
@@ -118,10 +109,7 @@ function describeClickQueue(metrics: QueueMetrics, now: number): string {
 		bytes >= 1024 * 1024
 			? `${(bytes / 1024 / 1024).toFixed(1)} MB`
 			: `${Math.ceil(bytes / 1024)} KB`;
-	const age =
-		oldest > 0
-			? `; the oldest has waited ${describeDuration(now - oldest)}`
-			: "";
+	const age = oldest > 0 ? `; the oldest has waited ${describeDuration(now - oldest)}` : "";
 	return `${waiting.toLocaleString("en-US")} click${waiting === 1 ? " is" : "s are"} waiting (${size})${age}.`;
 }
 
@@ -134,20 +122,13 @@ const componentIssues = {
 	journal: "ingest_journal_health",
 } as const satisfies Record<string, Issue>;
 
-const requiredComponents = Object.keys(componentIssues) as Array<
-	keyof typeof componentIssues
->;
+const requiredComponents = Object.keys(componentIssues) as Array<keyof typeof componentIssues>;
 
 type HealthStatus = "ok" | "degraded" | "error" | "invalid";
 
 export type IngestEvidence = {
 	endpoint: "ready" | "detailed";
-	result:
-		| "reported"
-		| "http_error"
-		| "transport_error"
-		| "invalid_response"
-		| "timeout";
+	result: "reported" | "http_error" | "transport_error" | "invalid_response" | "timeout";
 	http_status?: number;
 	timeout_ms?: number;
 	status?: HealthStatus | "ready" | "not_ready";
@@ -157,9 +138,7 @@ export type IngestEvidence = {
 type IngestCheck = { issues: Issue[]; evidence: IngestEvidence };
 
 function healthStatus(value: unknown): HealthStatus {
-	return value === "ok" || value === "degraded" || value === "error"
-		? value
-		: "invalid";
+	return value === "ok" || value === "degraded" || value === "error" ? value : "invalid";
 }
 
 function inspectIngestHealth(value: unknown): Omit<IngestCheck, "evidence"> & {
@@ -210,14 +189,11 @@ async function readIngestEndpoint(
 			const token = endpoint === "detailed" ? opsSecret(env) : undefined;
 			let response: Response;
 			try {
-				response = await sendRequest(
-					new URL(`/health/${endpoint}`, env.INGEST_ENDPOINT),
-					{
-						...(token ? { headers: { Authorization: `Bearer ${token}` } } : {}),
-						signal,
-						redirect: "manual",
-					},
-				);
+				response = await sendRequest(new URL(`/health/${endpoint}`, env.INGEST_ENDPOINT), {
+					...(token ? { headers: { Authorization: `Bearer ${token}` } } : {}),
+					signal,
+					redirect: "manual",
+				});
 			} catch {
 				if (signal.aborted)
 					return {
@@ -325,16 +301,11 @@ async function checkBackup(
 	now: number,
 	facts: Partial<Record<Issue, string>>,
 ): Promise<Issue[]> {
-	const object = await env.ANALYTICS_BACKUPS.get(
-		"snapshots/duckdb/latest.json",
-	);
-	if (!object || object.size > 16_384)
-		throw new Error("Backup manifest is unavailable");
+	const object = await env.ANALYTICS_BACKUPS.get("snapshots/duckdb/latest.json");
+	if (!object || object.size > 16_384) throw new Error("Backup manifest is unavailable");
 	const manifest = record(await object.json());
 	const created =
-		typeof manifest.createdAt === "string"
-			? Date.parse(manifest.createdAt)
-			: Number.NaN;
+		typeof manifest.createdAt === "string" ? Date.parse(manifest.createdAt) : Number.NaN;
 	if (
 		manifest.version !== 3 ||
 		typeof manifest.key !== "string" ||
@@ -383,9 +354,7 @@ export async function runSourceChecks(
 		{
 			failure: "failed_queue_unavailable",
 			run: async () => {
-				const waiting = count(
-					(await env.CLICK_EVENTS_FAILED.metrics()).backlogCount,
-				);
+				const waiting = count((await env.CLICK_EVENTS_FAILED.metrics()).backlogCount);
 				if (!waiting) return [];
 				facts.failed_clicks = `${waiting.toLocaleString("en-US")} click${waiting === 1 ? " is" : "s are"} in the failed-click queue.`;
 				return ["failed_clicks"];
@@ -398,13 +367,10 @@ export async function runSourceChecks(
 					prefix: unresolvedClickPrefix,
 					limit: 20,
 				});
-				if (!Array.isArray(result.objects))
-					throw new Error("Failed archive list is invalid");
+				if (!Array.isArray(result.objects)) throw new Error("Failed archive list is invalid");
 				if (!result.objects.length && !result.truncated) return [];
 				for (const object of result.objects.slice(0, 5)) {
-					const [queue, file] = String(object.key)
-						.slice(unresolvedClickPrefix.length)
-						.split("/");
+					const [queue, file] = String(object.key).slice(unresolvedClickPrefix.length).split("/");
 					if (queue && file?.endsWith(".json"))
 						failedClicks.push({ queue, messageId: file.slice(0, -5) });
 				}

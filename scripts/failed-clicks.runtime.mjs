@@ -10,9 +10,7 @@ import { fileURLToPath } from "node:url";
 
 const project = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const projectRequire = createRequire(resolve(project, "package.json"));
-const wranglerRequire = createRequire(
-	projectRequire.resolve("wrangler/package.json"),
-);
+const wranglerRequire = createRequire(projectRequire.resolve("wrangler/package.json"));
 const { Miniflare, Response, Log, LogLevel } = wranglerRequire("miniflare");
 const { build } = wranglerRequire("esbuild");
 const event = {
@@ -58,10 +56,8 @@ const original = {
 const mainQueue = "ndle-click-events-dev";
 const failedQueue = "ndle-click-events-failed-dev";
 const root = "failed-clicks/v1/";
-const archiveKey = (id, queue = failedQueue) =>
-	`${root}archive/${queue}/${id}.json`;
-const markerKey = (id, queue = failedQueue) =>
-	`${root}unresolved/${queue}/${id}.json`;
+const archiveKey = (id, queue = failedQueue) => `${root}archive/${queue}/${id}.json`;
+const markerKey = (id, queue = failedQueue) => `${root}unresolved/${queue}/${id}.json`;
 const wrapper = `
 import { consumeQueue } from ${JSON.stringify(resolve(project, "src/queue-handler.ts"))};
 import { replayFailedClick, resolveFailedClick, resolveInvalidFailedClick } from ${JSON.stringify(resolve(project, "src/failed-click-recovery.ts"))};
@@ -157,149 +153,153 @@ const ingestIds = new Set();
 const convexIds = new Set();
 const republished = [];
 const runtime = new Miniflare({
-	modules: true,
-	script: bundled.outputFiles[0].text,
-	compatibilityDate: "2025-09-15",
 	host: "127.0.0.1",
 	port: 0,
-	r2Buckets: ["FAILED_CLICK_ARCHIVES"],
 	log: new Log(LogLevel.ERROR),
-	outboundService: async (request) => {
-		const url = new URL(request.url);
-		outbound.push({
-			url: request.url,
-			headers: Object.fromEntries(request.headers),
-		});
-		if (url.hostname === "queue.example.test") {
-			republished.push(await request.json());
-			return Response.json({ accepted: true });
-		}
-		if (url.pathname === "/internal/events/receipt" && scenario.receiptRedirect)
-			return new Response(null, {
-				status: 302,
-				headers: { Location: "https://unexpected.example.test/" },
-			});
-		if (url.pathname === "/internal/events/receipt")
-			return Response.json({
-				idempotency_key: scenario.wrongReceipt
-					? "different-event"
-					: url.searchParams.get("idempotency_key"),
-				committed:
-					!scenario.notCommitted &&
-					ingestIds.has(url.searchParams.get("idempotency_key")),
-				user_id: scenario.wrongOwner ? "another-owner" : event.user_id,
-				occurred_at: scenario.wrongTime
-					? "2026-09-05T18:00:01.000Z"
-					: event.occurred_at,
-				link_id: scenario.wrongLink ? "another-link" : event.link_id,
-			});
-		if (url.pathname === "/ingest/batch") {
-			assert.equal(
-				request.headers.get("Authorization"),
-				"Bearer FAKE-ingest-secret",
-			);
-			// An ingest version from before the batch route.
-			if (scenario.noBatchRoute)
-				return new Response("Not found", { status: 404 });
-			const { events } = await request.json();
-			return Response.json({
-				success: true,
-				results: events.map((body, index) => {
-					assert.deepEqual(body, event);
-					const status = ingestIds.has(body.idempotency_key)
-						? "duplicate"
-						: "recorded";
-					ingestIds.add(body.idempotency_key);
-					return { index, idempotency_key: body.idempotency_key, status };
-				}),
-			});
-		}
-		if (url.pathname === "/ingest") {
-			assert.equal(
-				request.headers.get("Authorization"),
-				"Bearer FAKE-ingest-secret",
-			);
-			const body = await request.json();
-			if (scenario.ingestConflict)
-				return Response.json({ error: "different body" }, { status: 409 });
-			assert.deepEqual(body, event);
-			if (scenario.falseIgnored)
-				return Response.json(
-					{
-						success: true,
-						status: "ignored",
-						idempotency_key: body.idempotency_key,
+	workers: [
+		{
+			config: {
+				name: "failed-clicks-runtime",
+				compatibilityDate: "2025-09-15",
+				manifest: {
+					mainModule: "worker.mjs",
+					modules: {
+						"worker.mjs": {
+							type: "esm",
+							contents: bundled.outputFiles[0].text,
+						},
 					},
-					{ status: 202 },
-				);
-			const outcome = ingestIds.has(body.idempotency_key)
-				? "duplicate"
-				: "recorded";
-			ingestIds.add(body.idempotency_key);
-			return Response.json(
-				{
-					success: true,
-					status: "queued",
-					idempotency_key: body.idempotency_key,
-					committed: true,
-					outcome,
 				},
-				{ status: 202 },
-			);
-		}
-		if (url.hostname === "fixture.convex.cloud") {
-			const body = await request.json();
-			assert.equal(body.args[0].requestId, event.idempotency_key);
-			if (scenario.convexFailure)
-				return Response.json({
-					status: "error",
-					errorMessage: "Injected Convex failure",
-				});
-			const outcome = convexIds.has(body.args[0].requestId)
-				? "duplicate"
-				: "recorded";
-			convexIds.add(body.args[0].requestId);
-			return Response.json({
-				status: "success",
-				value: { outcome },
-				logLines: [],
-			});
-		}
-		if (url.pathname === "/health/detailed") {
-			if (scenario.healthRedirect)
-				return new Response(null, {
-					status: 302,
-					headers: { Location: "https://unexpected.example.test/health" },
-				});
-			const index =
-				outbound.filter(
-					(call) => new URL(call.url).pathname === "/health/detailed",
-				).length - 1;
-			const samples = scenario.healthSamples || [healthyOperations];
-			const sample = samples[Math.min(index, samples.length - 1)];
-			return Response.json(sample, {
-				status: sample.status === "ok" ? 200 : 503,
-			});
-		}
-		if (
-			url.pathname === "/health/ready" ||
-			url.hostname === "monitor.example.test"
-		)
-			return Response.json({ status: "ready" });
-		if (url.hostname === "api.resend.com") {
-			outbound.at(-1).email = await request.json();
-			if (scenario.emailRedirect)
-				return Response.json(
-					{ id: "not-accepted" },
-					{
-						status: 302,
-						headers: { Location: "https://unexpected.example.test/email" },
+				env: {
+					FAILED_CLICK_ARCHIVES: {
+						type: "r2",
+						name: "FAILED_CLICK_ARCHIVES",
 					},
-				);
-			return Response.json({ id: "isolated-alert" });
-		}
-		throw new Error("Unexpected outbound request blocked: " + request.url);
-	},
+				},
+			},
+			dev: {
+				outboundService: {
+					type: "fetcher",
+					handler: async (request) => {
+						const url = new URL(request.url);
+						outbound.push({
+							url: request.url,
+							headers: Object.fromEntries(request.headers),
+						});
+						if (url.hostname === "queue.example.test") {
+							republished.push(await request.json());
+							return Response.json({ accepted: true });
+						}
+						if (url.pathname === "/internal/events/receipt" && scenario.receiptRedirect)
+							return new Response(null, {
+								status: 302,
+								headers: { Location: "https://unexpected.example.test/" },
+							});
+						if (url.pathname === "/internal/events/receipt")
+							return Response.json({
+								idempotency_key: scenario.wrongReceipt
+									? "different-event"
+									: url.searchParams.get("idempotency_key"),
+								committed:
+									!scenario.notCommitted && ingestIds.has(url.searchParams.get("idempotency_key")),
+								user_id: scenario.wrongOwner ? "another-owner" : event.user_id,
+								occurred_at: scenario.wrongTime ? "2026-09-05T18:00:01.000Z" : event.occurred_at,
+								link_id: scenario.wrongLink ? "another-link" : event.link_id,
+							});
+						if (url.pathname === "/ingest/batch") {
+							assert.equal(request.headers.get("Authorization"), "Bearer FAKE-ingest-secret");
+							// An ingest version from before the batch route.
+							if (scenario.noBatchRoute) return new Response("Not found", { status: 404 });
+							const { events } = await request.json();
+							return Response.json({
+								success: true,
+								results: events.map((body, index) => {
+									assert.deepEqual(body, event);
+									const status = ingestIds.has(body.idempotency_key) ? "duplicate" : "recorded";
+									ingestIds.add(body.idempotency_key);
+									return { index, idempotency_key: body.idempotency_key, status };
+								}),
+							});
+						}
+						if (url.pathname === "/ingest") {
+							assert.equal(request.headers.get("Authorization"), "Bearer FAKE-ingest-secret");
+							const body = await request.json();
+							if (scenario.ingestConflict)
+								return Response.json({ error: "different body" }, { status: 409 });
+							assert.deepEqual(body, event);
+							if (scenario.falseIgnored)
+								return Response.json(
+									{
+										success: true,
+										status: "ignored",
+										idempotency_key: body.idempotency_key,
+									},
+									{ status: 202 },
+								);
+							const outcome = ingestIds.has(body.idempotency_key) ? "duplicate" : "recorded";
+							ingestIds.add(body.idempotency_key);
+							return Response.json(
+								{
+									success: true,
+									status: "queued",
+									idempotency_key: body.idempotency_key,
+									committed: true,
+									outcome,
+								},
+								{ status: 202 },
+							);
+						}
+						if (url.hostname === "fixture.convex.cloud") {
+							const body = await request.json();
+							assert.equal(body.args[0].requestId, event.idempotency_key);
+							if (scenario.convexFailure)
+								return Response.json({
+									status: "error",
+									errorMessage: "Injected Convex failure",
+								});
+							const outcome = convexIds.has(body.args[0].requestId) ? "duplicate" : "recorded";
+							convexIds.add(body.args[0].requestId);
+							return Response.json({
+								status: "success",
+								value: { outcome },
+								logLines: [],
+							});
+						}
+						if (url.pathname === "/health/detailed") {
+							if (scenario.healthRedirect)
+								return new Response(null, {
+									status: 302,
+									headers: { Location: "https://unexpected.example.test/health" },
+								});
+							const index =
+								outbound.filter((call) => new URL(call.url).pathname === "/health/detailed")
+									.length - 1;
+							const samples = scenario.healthSamples || [healthyOperations];
+							const sample = samples[Math.min(index, samples.length - 1)];
+							return Response.json(sample, {
+								status: sample.status === "ok" ? 200 : 503,
+							});
+						}
+						if (url.pathname === "/health/ready" || url.hostname === "monitor.example.test")
+							return Response.json({ status: "ready" });
+						if (url.hostname === "api.resend.com") {
+							outbound.at(-1).email = await request.json();
+							if (scenario.emailRedirect)
+								return Response.json(
+									{ id: "not-accepted" },
+									{
+										status: 302,
+										headers: { Location: "https://unexpected.example.test/email" },
+									},
+								);
+							return Response.json({ id: "isolated-alert" });
+						}
+						throw new Error("Unexpected outbound request blocked: " + request.url);
+					},
+				},
+			},
+		},
+	],
 });
 let passed = 0;
 async function run(name, args, check) {
@@ -337,11 +337,7 @@ try {
 		{ id: "original", attempts: 12 },
 		async (result) => {
 			assert.equal(result.acked, 1);
-			assert.equal(
-				(await (await bucket.get(archiveKey("original"))).json()).source
-					.attempts,
-				1,
-			);
+			assert.equal((await (await bucket.get(archiveKey("original"))).json()).source.attempts, 1);
 		},
 	);
 	for (const fault of [
@@ -351,23 +347,17 @@ try {
 		"marker-read",
 		"crash-before-ack",
 	]) {
-		await run(
-			fault + " does not acknowledge the message",
-			{ id: fault, fault },
-			(result) => {
-				assert.equal(result.acked, 0);
-				assert.equal(result.retried, 1);
-			},
-		);
+		await run(fault + " does not acknowledge the message", { id: fault, fault }, (result) => {
+			assert.equal(result.acked, 0);
+			assert.equal(result.retried, 1);
+		});
 		await run(
 			fault + " recovers on redelivery without replacing the body",
 			{ id: fault, attempts: 2 },
 			async (result) => {
 				assert.equal(result.acked, 1);
 				assert.deepEqual(
-					JSON.parse(
-						(await (await bucket.get(archiveKey(fault))).json()).body.data,
-					),
+					JSON.parse((await (await bucket.get(archiveKey(fault))).json()).body.data),
 					original,
 				);
 			},
@@ -393,10 +383,7 @@ try {
 			assert.equal(result.retried, 0);
 			assert.equal(outbound.length, 0);
 			assert.deepEqual(
-				JSON.parse(
-					(await (await bucket.get(archiveKey("invalid", mainQueue))).json())
-						.body.data,
-				),
+				JSON.parse((await (await bucket.get(archiveKey("invalid", mainQueue))).json()).body.data),
 				{ version: 17, malformed: [null, "kept", 3] },
 			);
 		},
@@ -414,10 +401,10 @@ try {
 		{ action: "operations" },
 		(result) => {
 			assert.equal(result.accepted, true);
-			assert.deepEqual(
-				result.calls.find((call) => call.method === "list").options,
-				{ prefix: `${root}unresolved/`, limit: 20 },
-			);
+			assert.deepEqual(result.calls.find((call) => call.method === "list").options, {
+				prefix: `${root}unresolved/`,
+				limit: 20,
+			});
 			const email = outbound.find((call) => call.email).email;
 			assert.match(email.text, /Failed clicks are waiting for you to replay them/);
 			// The email names the saved click and the exact replay commands.
@@ -454,15 +441,11 @@ try {
 			assert.equal(result.accepted, true);
 			assert.ok(Date.now() - confirmationStarted >= 15_000);
 			assert.equal(
-				outbound.filter(
-					(call) => new URL(call.url).pathname === "/health/detailed",
-				).length,
+				outbound.filter((call) => new URL(call.url).pathname === "/health/detailed").length,
 				2,
 			);
 			assert.equal(
-				outbound.filter(
-					(call) => new URL(call.url).hostname === "monitor.example.test",
-				).length,
+				outbound.filter((call) => new URL(call.url).hostname === "monitor.example.test").length,
 				1,
 			);
 			assert.equal(
@@ -486,10 +469,7 @@ try {
 			);
 			const emails = outbound.filter((call) => call.email);
 			assert.equal(emails.length, 1);
-			assert.match(
-				emails[0].email.text,
-				/The off-site copy of new clicks had a problem/,
-			);
+			assert.match(emails[0].email.text, /The off-site copy of new clicks had a problem/);
 			assert.doesNotMatch(emails[0].email.text, /PRIVATE-service-secret/);
 		},
 	);
@@ -503,14 +483,8 @@ try {
 			assert.equal(result.accepted, true);
 			const emails = outbound.filter((call) => call.email);
 			assert.equal(emails.length, 1);
-			assert.match(
-				emails[0].email.text,
-				/Failed clicks are waiting for you to replay them/,
-			);
-			assert.doesNotMatch(
-				emails[0].email.text,
-				/The off-site copy of new clicks had a problem/,
-			);
+			assert.match(emails[0].email.text, /Failed clicks are waiting for you to replay them/);
+			assert.doesNotMatch(emails[0].email.text, /The off-site copy of new clicks had a problem/);
 		},
 	);
 	await run(
@@ -541,15 +515,11 @@ try {
 				/The analytics service returned an error/,
 			);
 			assert.equal(
-				outbound.some(
-					(call) => new URL(call.url).hostname === "unexpected.example.test",
-				),
+				outbound.some((call) => new URL(call.url).hostname === "unexpected.example.test"),
 				false,
 			);
 			assert.equal(
-				outbound.filter(
-					(call) => new URL(call.url).pathname === "/health/detailed",
-				).length,
+				outbound.filter((call) => new URL(call.url).pathname === "/health/detailed").length,
 				2,
 			);
 		},
@@ -566,9 +536,7 @@ try {
 			},
 		);
 		await run(
-			"replayed delivery uses the same downstream event ID (attempt " +
-				attempt +
-				")",
+			"replayed delivery uses the same downstream event ID (attempt " + attempt + ")",
 			{ id: "replayed-" + attempt, queue: mainQueue, body: republished.at(-1) },
 			(result) => {
 				assert.equal(result.acked, 1);
@@ -635,10 +603,7 @@ try {
 		{ action: "resolve", key: archiveKey("original") },
 		async (result) => {
 			assert.equal(result.accepted, false);
-			assert.equal(
-				await (await bucket.get(markerKey("original"))).text(),
-				otherMarker,
-			);
+			assert.equal(await (await bucket.get(markerKey("original"))).text(), otherMarker);
 		},
 	);
 	await bucket.put(markerKey("original"), originalMarker);
@@ -832,9 +797,7 @@ try {
 		assert.ok(await bucket.get(markerKey("original")));
 		assert.ok(await bucket.get(archiveKey("original")));
 		passed++;
-		console.log(
-			"PASS real replay CLI sends the original object in the Cloudflare HTTP request",
-		);
+		console.log("PASS real replay CLI sends the original object in the Cloudflare HTTP request");
 	} finally {
 		await rm(transportDirectory, { recursive: true, force: true });
 	}

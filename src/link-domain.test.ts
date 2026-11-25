@@ -6,9 +6,7 @@ const production = "ndle.fyi,www.ndle.fyi";
 test("default short-link hosts serve every link", () => {
 	for (const host of ["ndle.fyi", "www.ndle.fyi"]) {
 		for (const domain of ["brand.example", null, undefined]) {
-			expect(
-				checkLinkDomain({ host, domain, shortLinkHosts: production }),
-			).toBe("allowed");
+			expect(checkLinkDomain({ host, domain, shortLinkHosts: production })).toBe("allowed");
 		}
 	}
 });
@@ -72,25 +70,17 @@ test("hosts and domains compare without case or a trailing dot", () => {
 test("missing or empty SHORT_LINK_HOSTS falls back to the production hosts", () => {
 	for (const shortLinkHosts of [undefined, "", " , "]) {
 		for (const host of ["ndle.fyi", "www.ndle.fyi"]) {
-			expect(checkLinkDomain({ host, domain: null, shortLinkHosts })).toBe(
-				"allowed",
-			);
+			expect(checkLinkDomain({ host, domain: null, shortLinkHosts })).toBe("allowed");
 		}
-		expect(
-			checkLinkDomain({ host: "dev.ndle.fyi", domain: null, shortLinkHosts }),
-		).toBe("denied");
+		expect(checkLinkDomain({ host: "dev.ndle.fyi", domain: null, shortLinkHosts })).toBe("denied");
 	}
 });
 
 test("a configured SHORT_LINK_HOSTS replaces the default hosts", () => {
 	const shortLinkHosts = "dev.ndle.fyi,www.dev.ndle.fyi";
-	expect(
-		checkLinkDomain({ host: "dev.ndle.fyi", domain: null, shortLinkHosts }),
-	).toBe("allowed");
-	expect(
-		checkLinkDomain({ host: "www.dev.ndle.fyi", domain: null, shortLinkHosts }),
-	).toBe("allowed");
-	expect(
-		checkLinkDomain({ host: "ndle.fyi", domain: null, shortLinkHosts }),
-	).toBe("denied");
+	expect(checkLinkDomain({ host: "dev.ndle.fyi", domain: null, shortLinkHosts })).toBe("allowed");
+	expect(checkLinkDomain({ host: "www.dev.ndle.fyi", domain: null, shortLinkHosts })).toBe(
+		"allowed",
+	);
+	expect(checkLinkDomain({ host: "ndle.fyi", domain: null, shortLinkHosts })).toBe("denied");
 });

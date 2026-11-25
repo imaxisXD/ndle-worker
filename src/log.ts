@@ -12,23 +12,15 @@ const levels: Record<ConfiguredLogLevel, number> = {
 };
 
 export type RequestLogger = {
-	[level in LogLevel]: (
-		message: string,
-		fields?: Record<string, unknown>,
-	) => void;
+	[level in LogLevel]: (message: string, fields?: Record<string, unknown>) => void;
 };
 
 export function createLogger(
 	configuredLevel?: string,
 	baseFields: Record<string, unknown> = {},
 ): RequestLogger {
-	const threshold =
-		levels[configuredLevel as ConfiguredLogLevel] ?? levels.info;
-	const write = (
-		level: LogLevel,
-		message: string,
-		fields?: Record<string, unknown>,
-	) => {
+	const threshold = levels[configuredLevel as ConfiguredLogLevel] ?? levels.info;
+	const write = (level: LogLevel, message: string, fields?: Record<string, unknown>) => {
 		if (levels[level] < threshold) return;
 		console[level](
 			JSON.stringify(

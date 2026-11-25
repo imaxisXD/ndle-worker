@@ -5,11 +5,7 @@ import type { QueuedClick, RedisValueObject } from "./types";
 
 afterEach(() => mock.restore());
 
-for (const destination of [
-	"not a URL",
-	"javascript:alert(1)",
-	"http://127.0.0.1",
-]) {
+for (const destination of ["not a URL", "javascript:alert(1)", "http://127.0.0.1"]) {
 	test(`returns 404 for an invalid stored destination: ${destination}`, async () => {
 		const redisLookup = spyOn(Redis, "fromEnv").mockReturnValue({
 			json: { get: async () => ({ destination, is_active: true }) },
@@ -62,22 +58,14 @@ async function open(
 	const send = mock(async (body: QueuedClick) => {
 		events.push(body);
 	});
-	const response = await app.request(
-		url,
-		{},
-		{ CLICK_EVENTS: { send }, ...env },
-	);
+	const response = await app.request(url, {}, { CLICK_EVENTS: { send }, ...env });
 	mock.restore();
 	return { response, send, set, events };
 }
 
 test("default short-link hosts open links bound to any domain", async () => {
 	for (const url of ["https://ndle.fyi/test", "https://www.ndle.fyi/test"]) {
-		for (const fields of [
-			{ domain: "go.brand.example" },
-			{ domain: null },
-			{},
-		]) {
+		for (const fields of [{ domain: "go.brand.example" }, { domain: null }, {}]) {
 			const { response, send } = await open(url, fields);
 			expect(response.status).toBe(302);
 			expect(send).toHaveBeenCalledTimes(1);
@@ -120,9 +108,7 @@ test("a legacy record without a domain still opens on a custom domain and is log
 	const { response, send } = await open("https://go.brand.example/test", {});
 	expect(response.status).toBe(302);
 	expect(send).toHaveBeenCalledTimes(1);
-	expect(
-		lines.map((line) => JSON.parse(line)).filter((line) => line.reason),
-	).toEqual([
+	expect(lines.map((line) => JSON.parse(line)).filter((line) => line.reason)).toEqual([
 		expect.objectContaining({
 			level: "info",
 			slug: "test",
@@ -146,11 +132,7 @@ test("missing or empty SHORT_LINK_HOSTS keeps the production short-link hosts", 
 	for (const env of [{}, { SHORT_LINK_HOSTS: "" }]) {
 		const allowed = await open("https://ndle.fyi/test", { domain: null }, env);
 		expect(allowed.response.status).toBe(302);
-		const denied = await open(
-			"https://go.brand.example/test",
-			{ domain: null },
-			env,
-		);
+		const denied = await open("https://go.brand.example/test", { domain: null }, env);
 		expect(denied.response.status).toBe(404);
 		expect(denied.send).not.toHaveBeenCalled();
 	}

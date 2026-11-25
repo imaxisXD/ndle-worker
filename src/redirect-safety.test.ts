@@ -43,8 +43,5 @@ test("blocks an expired link", () => {
 });
 
 test("allows a link with a future expiry", () => {
-	assert.equal(
-		getRedirectBlockReason({ ...activeLink, expires_at: 2_000 }, 1_000),
-		undefined,
-	);
+	assert.equal(getRedirectBlockReason({ ...activeLink, expires_at: 2_000 }, 1_000), undefined);
 });

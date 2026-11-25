@@ -1,11 +1,6 @@
 import { afterEach, expect, mock, spyOn, test } from "bun:test";
 import { issuePlaybooks } from "./alert-email";
-import {
-	buildAlert,
-	checkClickQueue,
-	checkIngestHealth,
-	checkOperations,
-} from "./operations";
+import { buildAlert, checkClickQueue, checkIngestHealth, checkOperations } from "./operations";
 import type { Bindings } from "./types";
 
 afterEach(() => mock.restore());
@@ -71,9 +66,7 @@ test("healthy checks read only metrics and the verified backup and send no email
 	spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
 		calls.push({ url: String(input), headers: new Headers(init?.headers) });
 		return Response.json(
-			String(input).includes("/health/detailed")
-				? healthy
-				: { status: "ready" },
+			String(input).includes("/health/detailed") ? healthy : { status: "ready" },
 		);
 	});
 	await checkOperations(env, now, fetch, 12_000, skipWait);
@@ -89,30 +82,18 @@ test("healthy checks read only metrics and the verified backup and send no email
 
 for (const [secrets, expected] of [
 	[{ OPS_SECRET: "ops-test-key" }, "Bearer ops-test-key"],
-	[
-		{ OPS_SECRET: "", INGEST_WRITE_SECRET: "write-test-key" },
-		"Bearer ingest-test-key",
-	],
-	[
-		{ API_SECRET: undefined, OPS_SECRET: "ops-test-key" },
-		"Bearer ops-test-key",
-	],
+	[{ OPS_SECRET: "", INGEST_WRITE_SECRET: "write-test-key" }, "Bearer ingest-test-key"],
+	[{ API_SECRET: undefined, OPS_SECRET: "ops-test-key" }, "Bearer ops-test-key"],
 	[{ API_SECRET: undefined }, null],
 ] as const) {
 	test(`detailed health sends ${expected ?? "no credentials"} given ${JSON.stringify(secrets)}`, async () => {
 		const env = { ...environment(), ...secrets } as Bindings;
 		const headers = new Map<string, string | null>();
 		spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
-			if (String(input).includes("resend.com"))
-				return Response.json({ id: "accepted" });
-			headers.set(
-				new URL(String(input)).pathname,
-				new Headers(init?.headers).get("Authorization"),
-			);
+			if (String(input).includes("resend.com")) return Response.json({ id: "accepted" });
+			headers.set(new URL(String(input)).pathname, new Headers(init?.headers).get("Authorization"));
 			return Response.json(
-				String(input).includes("/health/detailed")
-					? healthy
-					: { status: "ready" },
+				String(input).includes("/health/detailed") ? healthy : { status: "ready" },
 			);
 		});
 		await checkOperations(env, now, fetch, 12_000, skipWait);
@@ -143,10 +124,7 @@ test("queue age and size thresholds do not flag a small fresh backlog", () => {
 		),
 	).toEqual(["click_queue_old", "click_queue_large"]);
 	expect(
-		checkClickQueue(
-			{ ...empty, oldestMessageTimestamp: new Date(now - 60 * 60_000) },
-			now,
-		),
+		checkClickQueue({ ...empty, oldestMessageTimestamp: new Date(now - 60 * 60_000) }, now),
 	).toEqual([]);
 });
 
@@ -198,9 +176,7 @@ function withAlertState(env: Bindings) {
 	env.ANALYTICS_BACKUPS.get = (async (key: string) => {
 		if (key !== "operations/alert-state.json") return manifestGet(key);
 		const value = objects.get(key);
-		return value === undefined
-			? null
-			: { size: value.length, json: async () => JSON.parse(value) };
+		return value === undefined ? null : { size: value.length, json: async () => JSON.parse(value) };
 	}) as unknown as Bindings["ANALYTICS_BACKUPS"]["get"];
 	env.ANALYTICS_BACKUPS.put = (async (key: string, value: string) => {
 		objects.set(key, value);
@@ -250,17 +226,14 @@ test("failing checks send one plain-language alert once the next check confirms 
 test("without saved state the hourly email is identical so the provider sends it once", async () => {
 	const env = failingEnvironment();
 	env.ANALYTICS_BACKUPS.get = (async (key: string) => {
-		if (key === "operations/alert-state.json")
-			throw new Error("R2 unavailable");
+		if (key === "operations/alert-state.json") throw new Error("R2 unavailable");
 		return { size: 300, json: async () => manifest };
 	}) as unknown as Bindings["ANALYTICS_BACKUPS"]["get"];
 	const emails = captureEmails();
 	await checkOperations(env, now, fetch, 12_000, skipWait);
 	await checkOperations(env, now + 5 * 60_000, fetch, 12_000, skipWait);
 	expect(emails).toHaveLength(2);
-	expect(emails[0].headers.get("Idempotency-Key")).toBe(
-		emails[1].headers.get("Idempotency-Key"),
-	);
+	expect(emails[0].headers.get("Idempotency-Key")).toBe(emails[1].headers.get("Idempotency-Key"));
 	expect(emails[0].body).toBe(emails[1].body);
 });
 
@@ -286,34 +259,18 @@ test("an all-clear email names the problems that were fixed", async () => {
 			return Response.json({ id: "all-clear" });
 		}
 		return Response.json(
-			String(input).includes("/health/detailed")
-				? healthy
-				: { status: "ready" },
+			String(input).includes("/health/detailed") ? healthy : { status: "ready" },
 		);
 	});
-	await checkOperations(
-		healthyEnv as Bindings,
-		now + 10 * 60_000,
-		fetch,
-		12_000,
-		skipWait,
-	);
+	await checkOperations(healthyEnv as Bindings, now + 10 * 60_000, fetch, 12_000, skipWait);
 	expect(emails).toHaveLength(2);
 	const clear = JSON.parse(emails[1].body);
 	expect(clear.subject).toBe("[NDLE] All clear: everything is working again");
-	expect(clear.text).toContain(
-		"Clicks: Clicks are waiting longer than usual to be counted",
-	);
+	expect(clear.text).toContain("Clicks: Clicks are waiting longer than usual to be counted");
 	expect(clear.text).toContain("lasted about 10 minutes");
 	expect(state.has("operations/alert-state.json")).toBe(false);
 	// Later healthy checks stay silent.
-	await checkOperations(
-		healthyEnv as Bindings,
-		now + 15 * 60_000,
-		fetch,
-		12_000,
-		skipWait,
-	);
+	await checkOperations(healthyEnv as Bindings, now + 15 * 60_000, fetch, 12_000, skipWait);
 	expect(emails).toHaveLength(2);
 });
 
@@ -330,9 +287,7 @@ test("expired backups alert while a failed metric read is only logged", async ()
 			return Response.json({ id: "accepted" });
 		}
 		return Response.json(
-			String(input).includes("/health/detailed")
-				? healthy
-				: { status: "ready" },
+			String(input).includes("/health/detailed") ? healthy : { status: "ready" },
 		);
 	});
 	await checkOperations(env, now, fetch, 12_000, skipWait);
@@ -432,16 +387,12 @@ test("a failure still there at the next check is emailed, then cleared", async (
 	expect(emails).toHaveLength(0);
 	await runAt(env, 5);
 	expect(emails).toHaveLength(1);
-	expect(emails[0].subject).toBe(
-		"[NDLE] Urgent: The analytics service can't be reached",
-	);
+	expect(emails[0].subject).toBe("[NDLE] Urgent: The analytics service can't be reached");
 	expect(emails[0].text).toContain("about 5 minutes");
 	service.analyticsUp = true;
 	await runAt(env, 10);
 	expect(emails).toHaveLength(2);
-	expect(emails[1].text).toContain(
-		"Analytics service: The analytics service can't be reached",
-	);
+	expect(emails[1].text).toContain("Analytics service: The analytics service can't be reached");
 });
 
 test("link monitoring is emailed only after 30 minutes down, then cleared", async () => {
@@ -454,9 +405,7 @@ test("link monitoring is emailed only after 30 minutes down, then cleared", asyn
 	await runAt(env, 30);
 	await runAt(env, 35);
 	expect(emails).toHaveLength(1);
-	expect(emails[0].subject).toBe(
-		"[NDLE] Needs attention: Link monitoring is not running",
-	);
+	expect(emails[0].subject).toBe("[NDLE] Needs attention: Link monitoring is not running");
 	expect(emails[0].text).toContain("For at least 30 minutes");
 	service.monitorReady = true;
 	await runAt(env, 40);
@@ -500,9 +449,7 @@ test("an all-clear waits until a logged read failure passes too and keeps origin
 	queue.readable = true;
 	await runAt(env, 15);
 	expect(emails).toHaveLength(2);
-	expect(emails[1].text).toContain(
-		"Analytics service: The analytics service can't be reached",
-	);
+	expect(emails[1].text).toContain("Analytics service: The analytics service can't be reached");
 	expect(emails[1].text).toContain("lasted about 15 minutes");
 	expect(emails[1].text).not.toContain("click queue");
 });
@@ -517,14 +464,10 @@ test("provider rejection fails the run with HTTP status even on non-JSON bodies"
 		if (String(input).includes("resend.com"))
 			return new Response("<html>Bad Gateway</html>", { status: 503 });
 		return Response.json(
-			String(input).includes("/health/detailed")
-				? healthy
-				: { status: "ready" },
+			String(input).includes("/health/detailed") ? healthy : { status: "ready" },
 		);
 	});
-	await expect(checkOperations(env, now)).rejects.toThrow(
-		"email was not accepted (HTTP 503)",
-	);
+	await expect(checkOperations(env, now)).rejects.toThrow("email was not accepted (HTTP 503)");
 });
 
 test("development is silent and reminder keys change only at the next hour", async () => {
@@ -534,10 +477,7 @@ test("development is silent and reminder keys change only at the next hour", asy
 	await checkOperations(env, now, fetch, 12_000, skipWait);
 	expect(send).not.toHaveBeenCalled();
 	expect(buildAlert(["failed_clicks", "backup_old"], now).key).toBe(
-		buildAlert(
-			["backup_old", "failed_clicks", "failed_clicks"],
-			now + 5 * 60_000,
-		).key,
+		buildAlert(["backup_old", "failed_clicks", "failed_clicks"], now + 5 * 60_000).key,
 	);
 	expect(buildAlert(["failed_clicks"], now).key).not.toBe(
 		buildAlert(["failed_clicks"], now + 60 * 60_000).key,
@@ -554,9 +494,7 @@ test("an unready database alerts even when detailed component checks look health
 		}
 		if (url.includes("/health/ready"))
 			return Response.json({ status: "not_ready" }, { status: 503 });
-		return Response.json(
-			url.includes("/health/detailed") ? healthy : { status: "ready" },
-		);
+		return Response.json(url.includes("/health/detailed") ? healthy : { status: "ready" });
 	});
 	await checkOperations(environment(), now, fetch, 12_000, skipWait);
 	expect(text).toContain("up but not accepting clicks");
@@ -577,17 +515,13 @@ test("stalled native bindings cannot suppress a known failed-event alert", async
 			return Response.json({ id: "accepted" });
 		}
 		return Response.json(
-			String(input).includes("/health/detailed")
-				? healthy
-				: { status: "ready" },
+			String(input).includes("/health/detailed") ? healthy : { status: "ready" },
 		);
 	});
 	await checkOperations(env, now, fetch, 10);
 	// Without readable saved state, the stalled read can't be timed, so it waits.
 	expect(text).not.toContain("Could not read the click queue's status");
-	expect(text).toContain(
-		"Some clicks could not be delivered and were set aside",
-	);
+	expect(text).toContain("Some clicks could not be delivered and were set aside");
 	expect(text).toContain("couldn't be found or verified");
 });
 
@@ -597,16 +531,15 @@ test("redirected health checks alert and redirected email delivery fails without
 	spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
 		calls.push(String(input));
 		expect(init?.redirect).toBe("manual");
-		if (String(input).includes("resend.com"))
-			message = JSON.parse(String(init?.body)).text;
+		if (String(input).includes("resend.com")) message = JSON.parse(String(init?.body)).text;
 		return Response.json(
 			{ status: "ready", id: "not-an-email-receipt" },
 			{ status: 302, headers: { Location: "https://unexpected.example.test" } },
 		);
 	});
-	await expect(
-		checkOperations(environment(), now, fetch, 12_000, skipWait),
-	).rejects.toThrow("email was not accepted (HTTP 302)");
+	await expect(checkOperations(environment(), now, fetch, 12_000, skipWait)).rejects.toThrow(
+		"email was not accepted (HTTP 302)",
+	);
 	expect(message).toContain("The analytics service returned an error");
 	expect(message).toContain("Link monitoring is not running");
 	expect(calls).toEqual([
@@ -672,12 +605,8 @@ test("one 15-second confirmation suppresses a recovered component failure and re
 	});
 	await checkOperations(environment(), now, fixture.send, 12_000, wait);
 	expect(wait).toHaveBeenCalledTimes(1);
-	expect(
-		fixture.calls.filter((url) => url.includes("/health/detailed")),
-	).toHaveLength(2);
-	expect(fixture.calls.filter((url) => url.includes("monitor"))).toHaveLength(
-		1,
-	);
+	expect(fixture.calls.filter((url) => url.includes("/health/detailed"))).toHaveLength(2);
+	expect(fixture.calls.filter((url) => url.includes("monitor"))).toHaveLength(1);
 	expect(fixture.emails).toHaveLength(0);
 	const evidence = log.mock.calls.map((call) => JSON.parse(String(call[0])));
 	expect(evidence[0].checks[1]).toEqual({
@@ -711,9 +640,7 @@ test("health recovery preserves independently observed failed clicks and unresol
 	await checkOperations(env, now, fixture.send, 12_000, skipWait);
 	expect(fixture.emails).toHaveLength(1);
 	const text = JSON.parse(fixture.emails[0].body).text;
-	expect(text).toContain(
-		"Some clicks could not be delivered and were set aside",
-	);
+	expect(text).toContain("Some clicks could not be delivered and were set aside");
 	expect(text).toContain("Failed clicks are waiting for you to replay them");
 	expect(text).not.toContain("archive job reported a failure");
 	expect(env.CLICK_EVENTS_FAILED.metrics).toHaveBeenCalledTimes(1);
@@ -751,30 +678,19 @@ test("each required component has a distinct issue code and unknown response dat
 			},
 		}),
 	).toEqual(["ingest_health_failed"]);
-	expect(
-		checkIngestHealth({ status: "surprise", checks: healthy.checks }),
-	).toEqual(["ingest_health_invalid"]);
+	expect(checkIngestHealth({ status: "surprise", checks: healthy.checks })).toEqual([
+		"ingest_health_invalid",
+	]);
 });
 
 test("every one of the five ingest components is required", () => {
 	expect(checkIngestHealth(healthy)).toEqual([]);
-	for (const component of [
-		"duckdb",
-		"batch_writer",
-		"archiver",
-		"backup",
-		"journal",
-	]) {
+	for (const component of ["duckdb", "batch_writer", "archiver", "backup", "journal"]) {
 		const checks: Record<string, unknown> = { ...healthy.checks };
 		delete checks[component];
-		expect(checkIngestHealth({ status: "ok", checks })).toEqual([
-			"ingest_health_invalid",
-		]);
+		expect(checkIngestHealth({ status: "ok", checks })).toEqual(["ingest_health_invalid"]);
 	}
-	for (const broken of [
-		{ journal: "broken" },
-		{ journal: { status: "surprise" } },
-	]) {
+	for (const broken of [{ journal: "broken" }, { journal: { status: "surprise" } }]) {
 		expect(
 			checkIngestHealth({
 				status: "ok",
@@ -803,15 +719,10 @@ for (const [name, detailed, expectedEmail] of [
 				return Response.json({ id: "accepted" });
 			}
 			return Response.json(
-				String(input).includes("/health/detailed")
-					? detailed
-					: { status: "ready" },
+				String(input).includes("/health/detailed") ? detailed : { status: "ready" },
 				{
 					status:
-						String(input).includes("/health/detailed") &&
-						detailed.status !== "ok"
-							? 503
-							: 200,
+						String(input).includes("/health/detailed") && detailed.status !== "ok" ? 503 : 200,
 				},
 			);
 		});
@@ -875,9 +786,7 @@ test("HTTP 503 cannot be hidden by a healthy component body", async () => {
 	const wait = mock(skipWait);
 	await checkOperations(environment(), now, fixture.send, 12_000, wait);
 	expect(wait).toHaveBeenCalledTimes(1);
-	expect(fixture.emails[0].body).toContain(
-		"The analytics service returned an error",
-	);
+	expect(fixture.emails[0].body).toContain("The analytics service returned an error");
 });
 
 test("HTTP aborts before headers and during the response body are logged as ten-second timeouts", async () => {
@@ -899,9 +808,7 @@ test("HTTP aborts before headers and during the response body are logged as ten-
 		});
 		await checkOperations(environment(), now, fixture.send, 12_000, skipWait);
 		expect(fixture.emails[0].body).toContain("responding very slowly");
-		expect(fixture.emails[0].body).not.toContain(
-			"health report wasn't understood",
-		);
+		expect(fixture.emails[0].body).not.toContain("health report wasn't understood");
 		expect(fixture.emails[0].body).not.toContain("can't be reached");
 		const evidence = log.mock.calls
 			.map((call) => JSON.parse(String(call[0])))

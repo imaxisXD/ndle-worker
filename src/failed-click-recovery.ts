@@ -11,11 +11,7 @@ import type { Bindings, QueuedClick } from "./types";
 
 export { failedClickKeys, readFailedArchive } from "./failed-clicks";
 
-export async function replayFailedClick(
-	key: string,
-	bucket: R2Bucket,
-	queue: Queue<QueuedClick>,
-) {
+export async function replayFailedClick(key: string, bucket: R2Bucket, queue: Queue<QueuedClick>) {
 	const archive = await readFailedArchive(bucket, key);
 	const body = decodeFailedBody(archive.body);
 	const { event } = parseQueuedClick(body);
@@ -38,8 +34,7 @@ export async function resolveFailedClick(
 	const archive = await readFailedArchive(bucket, key);
 	const { event } = parseQueuedClick(decodeFailedBody(archive.body));
 	if (!event.tracking_enabled) {
-		if (!operator?.trim())
-			throw new Error("Record the operator resolving this disabled event");
+		if (!operator?.trim()) throw new Error("Record the operator resolving this disabled event");
 		return recordResolution(key, bucket, archive, {
 			eventId: event.idempotency_key,
 			operator: operator.trim(),
@@ -76,9 +71,7 @@ export async function resolveFailedClick(
 	});
 	if (response.status !== 200) {
 		await response.body?.cancel();
-		throw new Error(
-			"Ingest receipt could not be verified; the failure remains unresolved",
-		);
+		throw new Error("Ingest receipt could not be verified; the failure remains unresolved");
 	}
 	const receipt = await response.json<{
 		idempotency_key?: unknown;
@@ -136,9 +129,7 @@ export async function resolveInvalidFailedClick(
 		/* Explicit invalid-message review only. */
 	}
 	if (valid)
-		throw new Error(
-			"A valid click requires verified downstream receipts before resolution",
-		);
+		throw new Error("A valid click requires verified downstream receipts before resolution");
 	return recordResolution(key, bucket, archive, {
 		decision: "invalid_event_reviewed",
 		operator: decision.operator.trim(),
@@ -175,9 +166,7 @@ async function recordResolution(
 	});
 	const saved = await bucket.get(resolutionKey);
 	if (!saved || (await saved.text()) !== record)
-		throw new Error(
-			"Resolution evidence was not stored; the failure remains unresolved",
-		);
+		throw new Error("Resolution evidence was not stored; the failure remains unresolved");
 	await bucket.delete(keys.unresolved);
 	if (await bucket.get(keys.unresolved))
 		throw new Error("The failure was delivered again and still needs review");
