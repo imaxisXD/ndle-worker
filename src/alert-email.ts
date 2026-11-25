@@ -66,19 +66,6 @@ function analyticsSteps(links: AlertLinks, extra: string[] = []): string[] {
 	];
 }
 
-const legacyAnalytics: Omit<Playbook, "title"> = {
-	area: "Analytics service",
-	urgency: "soon",
-	meaning:
-		"Only the previous analytics version (the one that used Redis) reports this. Seeing it means that old version may be running again.",
-	lost: "Clicks wait safely in the Cloudflare queue while this is sorted out.",
-	steps: ({ links }) => [
-		`Open Coolify (${links.coolify}) → ndle-ingest-service and check which commit is deployed.`,
-		"Redeploy the latest master of ndle-ingest-service.",
-	],
-	fixed: nextCheck,
-};
-
 export const issuePlaybooks = {
 	click_queue_old: {
 		area: "Clicks",
@@ -330,50 +317,6 @@ export const issuePlaybooks = {
 		],
 		fixed: nextCheck,
 	},
-	ingest_queue_health: {
-		...legacyAnalytics,
-		title: "An old analytics component reported a queue problem",
-	},
-	ingest_recovery_health: {
-		...legacyAnalytics,
-		title: "An old analytics recovery check failed",
-	},
-	ingest_recovery_overdue: {
-		...legacyAnalytics,
-		title: "Old analytics recovery work is overdue",
-	},
-	ingest_recovery_stalled: {
-		...legacyAnalytics,
-		title: "Old analytics recovery has stopped",
-	},
-	ingest_recovery_unavailable: {
-		...legacyAnalytics,
-		title: "Old analytics recovery hasn't checked in",
-	},
-	ingest_recovery_records: {
-		...legacyAnalytics,
-		title: "Old analytics recovery found records to review",
-	},
-	ingest_recovery_scan_overdue: {
-		...legacyAnalytics,
-		title: "An old analytics scan is overdue",
-	},
-	ingest_recovery_error: {
-		...legacyAnalytics,
-		title: "Old analytics recovery reported an error",
-	},
-	ingest_recovery_scan_error: {
-		...legacyAnalytics,
-		title: "An old analytics scan reported an error",
-	},
-	ingest_failed_jobs: {
-		...legacyAnalytics,
-		title: "The old analytics queue has failed jobs",
-	},
-	ingest_queue_large: {
-		...legacyAnalytics,
-		title: "The old analytics queue is backed up",
-	},
 	backup_old: {
 		area: "Backups",
 		title: "The latest database backup is more than a day old",
@@ -498,10 +441,12 @@ function escapeHtml(value: string): string {
 		.replaceAll('"', "&quot;");
 }
 
+const httpsUrlRegex = /https:\/\/[^\s)"&]+[^\s)".,&]/g;
+
 /** Escapes text and turns bare https links into anchors. */
 function htmlText(value: string): string {
 	return escapeHtml(value).replace(
-		/https:\/\/[^\s)"&]+[^\s)".,&]/g,
+		httpsUrlRegex,
 		(url) => `<a href="${url}" style="color:#2563eb">${url}</a>`,
 	);
 }

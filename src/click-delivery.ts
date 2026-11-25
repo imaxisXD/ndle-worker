@@ -1,21 +1,15 @@
-import { ConvexHttpClient } from "convex/browser";
 import {
 	type BatchStatus,
 	sendAnalyticsBatch,
 	sendAnalyticsEvent,
 } from "./analytics";
 import { parseQueuedClick } from "./click-envelope";
-import { recordClick } from "./convex-api";
+import { mutateRecordClick } from "./convex-api";
 import { archiveFailedClick } from "./failed-clicks";
+import { isRecord } from "./guards";
 import { ingestWriteSecret } from "./ingest-auth";
 import { createLogger } from "./log";
 import type { AnalyticsEvent, Bindings } from "./types";
-
-export { parseQueuedClick } from "./click-envelope";
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-	return typeof value === "object" && value !== null && !Array.isArray(value);
-}
 
 const terminalClickOutcomes = new Set([
 	"recorded",
@@ -40,37 +34,31 @@ function deliverySettings(env: Bindings) {
 
 type DeliverySettings = ReturnType<typeof deliverySettings>;
 
-// Runs after ingest has committed the click. Each click gets its own client:
-// one ConvexHttpClient runs its queued mutations one at a time.
+// Runs after ingest has committed the click.
 async function recordLiveClick(
 	event: AnalyticsEvent,
 	settings: DeliverySettings,
 ): Promise<string> {
 	if (event.is_bot) return "bot_recorded";
 	if (!event.link_id) throw new Error("Click event is missing its link ID");
-	const convex = new ConvexHttpClient(settings.convexUrl, {
-		fetch: (input, init) =>
-			fetch(input, {
-				...init,
-				redirect: "manual",
-				signal: AbortSignal.timeout(10_000),
-			}),
-	});
-	const result = await convex.mutation(recordClick, {
-		sharedSecret: settings.sharedSecret,
-		urlId: event.link_id,
-		urlStatusCode: 0,
-		urlStatusMessage: "",
-		requestId: event.idempotency_key,
-		clickEvent: {
-			linkSlug: event.link_slug,
-			occurredAt: Date.parse(event.occurred_at),
-			country: event.country || "Unknown",
-			city: event.city ?? undefined,
-			deviceType: event.device_type || "desktop",
-			browser: event.browser || "Unknown",
-			os: event.os || "Unknown",
-			referer: event.referer ?? undefined,
+	const result = await mutateRecordClick({
+		convexUrl: settings.convexUrl,
+		args: {
+			sharedSecret: settings.sharedSecret,
+			urlId: event.link_id,
+			urlStatusCode: 0,
+			urlStatusMessage: "",
+			requestId: event.idempotency_key,
+			clickEvent: {
+				linkSlug: event.link_slug,
+				occurredAt: Date.parse(event.occurred_at),
+				country: event.country || "Unknown",
+				city: event.city ?? undefined,
+				deviceType: event.device_type || "desktop",
+				browser: event.browser || "Unknown",
+				os: event.os || "Unknown",
+				referer: event.referer ?? undefined,
+			},
 		},
 	});
 	if (
@@ -84,8 +72,8 @@ async function recordLiveClick(
 }
 
 /**
- * Deliver one click through the single-event ingest route, then Convex. Used by
- * operator recovery and when ingest does not have the batch route yet.
+ * Deliver one click through the single-event ingest route, then Convex.
+ * Used by operator recovery (`resolveFailedClick`).
  */
 export async function deliverClick(
 	event: AnalyticsEvent,
@@ -93,12 +81,11 @@ export async function deliverClick(
 ): Promise<string> {
 	if (!event.tracking_enabled) return "tracking_disabled";
 	const settings = deliverySettings(env);
-	const ingestOutcome = await sendAnalyticsEvent({
+	await sendAnalyticsEvent({
 		endpoint: settings.endpoint,
 		token: settings.token,
 		event,
 	});
-	if (ingestOutcome === "ignored") return "tracking_disabled";
 	return recordLiveClick(event, settings);
 }
 
@@ -197,7 +184,7 @@ export async function consumeClicks(
 			groups.push(clicks.slice(i, i + maxBatchEvents));
 		await Promise.all(
 			groups.map(async (group) => {
-				let statuses: BatchStatus[] | "unsupported";
+				let statuses: BatchStatus[];
 				try {
 					statuses = await sendAnalyticsBatch({
 						endpoint: settings.endpoint,
@@ -211,11 +198,6 @@ export async function consumeClicks(
 					return;
 				}
 				group.forEach((click, index) => {
-					if (statuses === "unsupported") {
-						// Older ingest without the batch route: deliver each click.
-						writes.push([click, () => deliverClick(click.event, env)]);
-						return;
-					}
 					const status = statuses[index];
 					// Only tracked clicks are sent, so "ignored" is as unexpected as a
 					// rejection. Like a rejected single-event request, retries end in

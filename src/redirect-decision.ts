@@ -1,16 +1,12 @@
 import { resolveABTest } from "./ab-testing";
-import {
-	appendUtmParamsToUrl,
-	assertSafeDestinationUrl,
-	sha256Hex,
-} from "./helper";
+import { sha256Hex } from "./crypto";
+import { type HeaderReader, readClientIp } from "./guards";
 import {
 	getRedirectBlockReason,
 	type RedirectBlockReason,
 } from "./redirect-safety";
 import type { RedisValueObject } from "./types";
-
-type HeaderReader = (name: string) => string | undefined;
+import { appendUtmParamsToUrl, assertSafeDestinationUrl } from "./url-safety";
 
 type RedirectDecision =
 	| {
@@ -30,8 +26,7 @@ async function buildVariantSessionId(
 	readHeader: HeaderReader,
 ): Promise<string> {
 	const userAgent = readHeader("user-agent") ?? "";
-	const ip =
-		readHeader("cf-connecting-ip") ?? readHeader("x-forwarded-for") ?? "";
+	const ip = readClientIp(readHeader);
 	return sha256Hex(`${linkId}\n${ip}\n${userAgent}`);
 }
 
@@ -45,24 +40,21 @@ async function decideRedirect(params: {
 	if (blockReason) {
 		return { kind: "blocked", reason: blockReason };
 	}
-
-	const destinationText = redisValue?.destination;
-	if (!destinationText) {
-		return { kind: "blocked", reason: "missing destination" };
-	}
+	// getRedirectBlockReason verified redisValue and redisValue.destination exist.
+	const link = redisValue as RedisValueObject;
 
 	let destination: URL;
 	try {
-		destination = assertSafeDestinationUrl(destinationText);
+		destination = assertSafeDestinationUrl(link.destination);
 	} catch {
 		return { kind: "blocked", reason: "invalid destination" };
 	}
 	let variantId: string | null = null;
-	const abConfig = redisValue?.rules?.ab_test;
+	const abConfig = link.rules?.ab_test;
 
 	if (abConfig?.enabled && abConfig.variants?.length) {
 		const sessionId = await buildVariantSessionId(
-			redisValue?.link_id ?? "",
+			link.link_id ?? "",
 			readHeader,
 		);
 		const result = resolveABTest(abConfig, sessionId);
@@ -76,8 +68,8 @@ async function decideRedirect(params: {
 		}
 	}
 
-	const utmParams = redisValue?.utm_params ?? {};
-	if (Object.keys(utmParams).length > 0) {
+	const utmParams = link.utm_params;
+	if (utmParams && Object.keys(utmParams).length > 0) {
 		destination = appendUtmParamsToUrl(destination, utmParams);
 	}
 

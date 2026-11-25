@@ -1,9 +1,12 @@
 import { parseQueuedClick } from "./click-envelope";
+import { sha256Hex } from "./crypto";
 import { createLogger } from "./log";
 import type { Bindings } from "./types";
 
 export const failedClickPrefix = "failed-clicks/v1/";
 export const unresolvedClickPrefix = `${failedClickPrefix}unresolved/`;
+
+const queueOrMessageIdRegex = /^[A-Za-z0-9_-]{1,128}$/;
 
 type StoredBody =
 	| { encoding: "json"; data: string }
@@ -29,8 +32,8 @@ export function failedClickKeys(queue: string, messageId: string) {
 	if (
 		typeof queue !== "string" ||
 		typeof messageId !== "string" ||
-		!/^[A-Za-z0-9_-]{1,128}$/.test(queue) ||
-		!/^[A-Za-z0-9_-]{1,128}$/.test(messageId)
+		!queueOrMessageIdRegex.test(queue) ||
+		!queueOrMessageIdRegex.test(messageId)
 	) {
 		throw new Error("Failed click has an invalid queue or message ID");
 	}
@@ -87,13 +90,7 @@ export function decodeFailedBody(body: StoredBody): unknown {
 }
 
 export async function bodyHash(body: StoredBody): Promise<string> {
-	const hash = await crypto.subtle.digest(
-		"SHA-256",
-		new TextEncoder().encode(JSON.stringify(body)),
-	);
-	return [...new Uint8Array(hash)]
-		.map((byte) => byte.toString(16).padStart(2, "0"))
-		.join("");
+	return sha256Hex(JSON.stringify(body));
 }
 
 export async function readFailedArchive(

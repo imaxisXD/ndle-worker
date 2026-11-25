@@ -184,6 +184,6 @@ test("visitor-supplied click fields are cut below ingest's limit", async () => {
 	expect(event?.user_agent).toHaveLength(512);
 	expect(event?.referer).toHaveLength(2048);
 	expect(event?.language).toHaveLength(35);
-	expect(event?.browser).toHaveLength(64);
-	expect(event?.os).toHaveLength(64);
+	expect(event?.browser).toBe("Other");
+	expect(event?.os).toBe("Other");
 });

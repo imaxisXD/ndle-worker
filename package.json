@@ -13,8 +13,7 @@
   },
   "dependencies": {
     "@upstash/redis": "^1.38.0",
-    "convex": "^1.41.0",
-    "hono": "^4.12.27"
+    "hono": "^4.13.22"
   },
   "devDependencies": {
     "@biomejs/biome": "2.5.0",

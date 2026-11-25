@@ -21,12 +21,11 @@ const manifest = {
 const healthy = {
 	status: "ok",
 	checks: {
-		queue: { status: "ok", details: { waiting: 0, failed: 0 } },
 		duckdb: { status: "ok" },
 		batch_writer: { status: "ok" },
 		archiver: { status: "ok" },
 		backup: { status: "ok" },
-		recovery: { status: "ok", details: {} },
+		journal: { status: "ok", details: { writes: { failing: false } } },
 	},
 };
 
@@ -180,9 +179,10 @@ function captureEmails() {
 			String(input).includes("/health/detailed")
 				? {
 						...healthy,
+						status: "degraded",
 						checks: {
 							...healthy.checks,
-							queue: { status: "ok", details: { waiting: 0, failed: 1 } },
+							journal: { status: "degraded" },
 						},
 					}
 				: { status: "not ready" },
@@ -227,7 +227,7 @@ test("failing checks send one plain-language alert once the next check confirms 
 	const message = JSON.parse(emails[0].body);
 	expect(message.to).toEqual(["owner@example.test"]);
 	expect(message.subject).toBe(
-		"[NDLE] Needs attention: The latest backup couldn't be found or verified (+4 more)",
+		"[NDLE] Urgent: The off-site copy of new clicks had a problem (+4 more)",
 	);
 	// Link monitoring waits 30 minutes, so the first alert leaves it out.
 	expect(message.text).not.toContain("Link monitoring is not running");
@@ -237,7 +237,7 @@ test("failing checks send one plain-language alert once the next check confirms 
 		"Is anything lost? No. Waiting clicks are kept for 14 days",
 		"What to do:",
 		"It's fixed when:",
-		"The old analytics queue has failed jobs",
+		"The off-site copy of new clicks had a problem",
 		"couldn't be found or verified",
 	])
 		expect(message.text).toContain(expected);
@@ -391,19 +391,19 @@ test("a failure to read the click queue is only logged, however long it lasts", 
 	const env = environment();
 	const state = withAlertState(env);
 	const emails = captureAlerts();
-	const warn = spyOn(console, "warn");
+	const warn = spyOn(console, "warn").mockImplementation(() => {});
 	const queue = unreadableClickQueue(env);
 	for (let minutes = 0; minutes <= 120; minutes += 5) await runAt(env, minutes);
 	expect(emails).toHaveLength(0);
 	// Only the error name and Cloudflare's code are logged, not its message.
-	expect(warn).toHaveBeenCalledWith(
-		JSON.stringify({
-			message: "NDLE operations check failed",
-			check: "click_queue_unavailable",
-			error: "Error",
-			cloudflare_code: "15000",
-		}),
-	);
+	expect(JSON.parse(String(warn.mock.calls[0][0]))).toMatchObject({
+		component: "operations",
+		level: "warn",
+		message: "NDLE operations check failed",
+		check: "click_queue_unavailable",
+		error: "Error",
+		cloudflare_code: "15000",
+	});
 	queue.readable = true;
 	await runAt(env, 125);
 	expect(emails).toHaveLength(0);
@@ -483,7 +483,7 @@ test("a waiting problem keeps its start time while another problem is emailed", 
 	);
 });
 
-test("an all-clear waits until a logged read failure passes too", async () => {
+test("an all-clear waits until a logged read failure passes too and keeps original outage duration", async () => {
 	const env = environment();
 	withAlertState(env);
 	const service = { analyticsUp: false, monitorReady: true };
@@ -503,10 +503,11 @@ test("an all-clear waits until a logged read failure passes too", async () => {
 	expect(emails[1].text).toContain(
 		"Analytics service: The analytics service can't be reached",
 	);
+	expect(emails[1].text).toContain("lasted about 15 minutes");
 	expect(emails[1].text).not.toContain("click queue");
 });
 
-test("provider rejection fails the run instead of claiming email delivery", async () => {
+test("provider rejection fails the run with HTTP status even on non-JSON bodies", async () => {
 	const env = environment();
 	env.CLICK_EVENTS_FAILED.metrics = async () => ({
 		backlogCount: 1,
@@ -514,7 +515,7 @@ test("provider rejection fails the run instead of claiming email delivery", asyn
 	});
 	spyOn(globalThis, "fetch").mockImplementation(async (input) => {
 		if (String(input).includes("resend.com"))
-			return Response.json({ message: "Unavailable" }, { status: 503 });
+			return new Response("<html>Bad Gateway</html>", { status: 503 });
 		return Response.json(
 			String(input).includes("/health/detailed")
 				? healthy
@@ -595,8 +596,6 @@ test("redirected health checks alert and redirected email delivery fails without
 	let message = "";
 	spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
 		calls.push(String(input));
-		// Cloudflare only supports follow and manual. Manual also keeps service
-		// credentials from being forwarded to an unexpected redirect destination.
 		expect(init?.redirect).toBe("manual");
 		if (String(input).includes("resend.com"))
 			message = JSON.parse(String(init?.body)).text;
@@ -619,17 +618,6 @@ test("redirected health checks alert and redirected email delivery fails without
 		"https://api.resend.com/emails",
 	]);
 });
-
-function unhealthyRecovery(details: Record<string, unknown>) {
-	return {
-		...healthy,
-		status: "degraded",
-		checks: {
-			...structuredClone(healthy.checks),
-			recovery: { status: "degraded", details },
-		},
-	};
-}
 
 function healthScenario(
 	samples: unknown[],
@@ -668,10 +656,14 @@ function healthScenario(
 test("one 15-second confirmation suppresses a recovered component failure and records safe evidence", async () => {
 	const log = spyOn(console, "info").mockImplementation(() => {});
 	const fixture = healthScenario([
-		unhealthyRecovery({
-			unavailable: true,
-			lastError: "secret URL ?token=private",
-		}),
+		{
+			...healthy,
+			status: "degraded",
+			checks: {
+				...healthy.checks,
+				journal: { status: "degraded", details: "secret URL ?token=private" },
+			},
+		},
 		healthy,
 	]);
 	const wait = mock(async (delay: number) => {
@@ -693,94 +685,47 @@ test("one 15-second confirmation suppresses a recovered component failure and re
 		result: "reported",
 		http_status: 503,
 		status: "degraded",
-		failed_components: ["recovery"],
-		recovery_reasons: ["unavailable", "lastError"],
+		failed_components: ["journal"],
 	});
 	expect(evidence[1].phase).toBe("confirmation");
 	expect(evidence[1].issues).toEqual([]);
 	expect(JSON.stringify(evidence)).not.toContain("private");
 });
 
-test("health recovery preserves initial failed jobs, large queues, and unresolved archives in one email", async () => {
+test("health recovery preserves independently observed failed clicks and unresolved archives in one email", async () => {
 	const env = environment();
 	env.CLICK_EVENTS_FAILED.metrics = mock(async () => ({
 		backlogCount: 1,
 		backlogBytes: 1,
 	}));
 	env.FAILED_CLICK_ARCHIVES.list = mock(async () => ({
-		objects: [{ key: "private-object" }],
+		objects: [{ key: "failed-clicks/v1/unresolved/main/msg-1.json" }],
 		truncated: false,
 	})) as typeof env.FAILED_CLICK_ARCHIVES.list;
-	const bad = unhealthyRecovery({ overdue: true, problemRecordsPresent: true });
-	bad.checks.queue.details = { waiting: 1_001, failed: 2 };
+	const bad = {
+		...healthy,
+		status: "error",
+		checks: { ...healthy.checks, archiver: { status: "error" } },
+	};
 	const fixture = healthScenario([bad, healthy]);
 	await checkOperations(env, now, fixture.send, 12_000, skipWait);
 	expect(fixture.emails).toHaveLength(1);
 	const text = JSON.parse(fixture.emails[0].body).text;
-	expect(text).toContain("The old analytics queue has failed jobs");
-	expect(text).toContain("The old analytics queue is backed up");
 	expect(text).toContain(
 		"Some clicks could not be delivered and were set aside",
 	);
 	expect(text).toContain("Failed clicks are waiting for you to replay them");
-	expect(text).toContain("Old analytics recovery found records to review");
-	expect(text).not.toContain("recovery check failed");
+	expect(text).not.toContain("archive job reported a failure");
 	expect(env.CLICK_EVENTS_FAILED.metrics).toHaveBeenCalledTimes(1);
 	expect(env.FAILED_CLICK_ARCHIVES.list).toHaveBeenCalledTimes(1);
 });
 
-test("failed jobs without a health failure alert immediately without confirmation", async () => {
-	const value = structuredClone(healthy);
-	value.checks.queue.details.failed = 1;
-	const fixture = healthScenario([value]);
-	const wait = mock(skipWait);
-	await checkOperations(environment(), now, fixture.send, 12_000, wait);
-	expect(wait).not.toHaveBeenCalled();
-	expect(fixture.emails).toHaveLength(1);
-	expect(fixture.calls).toHaveLength(4);
-});
-
-test("persistent recovery flags have fixed messages and stable hourly keys despite changed error text", async () => {
-	const log = spyOn(console, "info").mockImplementation(() => {});
-	const first = unhealthyRecovery({
-		auditOverdue: true,
-		auditLastError: "first PRIVATE-secret",
-	});
-	const second = unhealthyRecovery({
-		auditOverdue: true,
-		auditLastError: "different PRIVATE-secret",
-		unknown: "PRIVATE-secret",
-	});
-	const a = healthScenario([first]);
-	const b = healthScenario([second]);
-	await checkOperations(environment(), now, a.send, 12_000, skipWait);
-	await checkOperations(
-		environment(),
-		now + 5 * 60_000,
-		b.send,
-		12_000,
-		skipWait,
-	);
-	expect(a.emails).toHaveLength(1);
-	expect(b.emails).toHaveLength(1);
-	expect(JSON.parse(a.emails[0].body).subject).toBe(
-		JSON.parse(b.emails[0].body).subject,
-	);
-	expect(a.emails[0].body).toContain("An old analytics scan is overdue");
-	expect(a.emails[0].body).toContain("An old analytics scan reported an error");
-	expect(JSON.stringify([a.emails, log.mock.calls])).not.toContain(
-		"PRIVATE-secret",
-	);
-});
-
-test("each known failed component has a distinct issue code and unknown response data stays out", () => {
+test("each required component has a distinct issue code and unknown response data stays out", () => {
 	const expected = {
-		queue: "ingest_queue_health",
 		duckdb: "ingest_database_health",
 		batch_writer: "ingest_writer_health",
 		archiver: "ingest_archiver_health",
 		backup: "ingest_backup_health",
-		recovery: "ingest_recovery_health",
 		journal: "ingest_journal_health",
 	};
 	for (const [component, issue] of Object.entries(expected)) {
@@ -791,7 +736,7 @@ test("each known failed component has a distinct issue code and unknown response
 				...healthy.checks,
 				[component]: {
 					status: "error",
-					details: component === "recovery" ? {} : "secret text",
+					details: "secret text",
 				},
 			},
 		};
@@ -811,74 +756,41 @@ test("each known failed component has a distinct issue code and unknown response
 	).toEqual(["ingest_health_invalid"]);
 });
 
-// Current ingest: no Redis queue or per-event recovery loop, plus a journal.
-const journalHealthy = {
-	status: "ok",
-	checks: {
-		duckdb: { status: "ok" },
-		batch_writer: { status: "ok" },
-		archiver: { status: "ok" },
-		backup: { status: "ok" },
-		journal: { status: "ok", details: { replayed: 0 } },
-	},
-};
-
-test("old and new ingest health shapes are both healthy without false alerts", () => {
+test("every one of the five ingest components is required", () => {
 	expect(checkIngestHealth(healthy)).toEqual([]);
-	expect(checkIngestHealth(journalHealthy)).toEqual([]);
-	expect(
-		checkIngestHealth({
-			status: "ok",
-			checks: { ...healthy.checks, journal: journalHealthy.checks.journal },
-		}),
-	).toEqual([]);
-});
-
-test("a failed journal has its own issue and present optional components are still validated", () => {
-	expect(
-		checkIngestHealth({
-			status: "error",
-			checks: {
-				...journalHealthy.checks,
-				journal: { status: "error", details: "PRIVATE-replay-error" },
-			},
-		}),
-	).toEqual(["ingest_journal_health"]);
+	for (const component of [
+		"duckdb",
+		"batch_writer",
+		"archiver",
+		"backup",
+		"journal",
+	]) {
+		const checks: Record<string, unknown> = { ...healthy.checks };
+		delete checks[component];
+		expect(checkIngestHealth({ status: "ok", checks })).toEqual([
+			"ingest_health_invalid",
+		]);
+	}
 	for (const broken of [
 		{ journal: "broken" },
 		{ journal: { status: "surprise" } },
-		{ queue: null },
-		{ queue: { status: "ok" } },
-		{ recovery: { status: "degraded" } },
 	]) {
 		expect(
 			checkIngestHealth({
 				status: "ok",
-				checks: { ...journalHealthy.checks, ...broken },
+				checks: { ...healthy.checks, ...broken },
 			}),
 		).toContain("ingest_health_invalid");
 	}
 });
 
-test("a missing required component is invalid in either health shape", () => {
-	for (const shape of [healthy, journalHealthy]) {
-		for (const component of ["duckdb", "batch_writer", "archiver", "backup"]) {
-			const checks: Record<string, unknown> = { ...shape.checks };
-			delete checks[component];
-			expect(checkIngestHealth({ status: "ok", checks })).toEqual([
-				"ingest_health_invalid",
-			]);
-		}
-	}
-});
-
 for (const [name, detailed, expectedEmail] of [
-	["new-shape healthy ingest sends no email", journalHealthy, null],
+	["healthy ingest sends no email", healthy, null],
 	[
 		"a persistent journal failure sends its specific alert",
 		{
 			status: "error",
-			checks: { ...journalHealthy.checks, journal: { status: "error" } },
+			checks: { ...healthy.checks, journal: { status: "error" } },
 		},
 		"The off-site copy of new clicks had a problem",
 	],
@@ -908,14 +820,11 @@ for (const [name, detailed, expectedEmail] of [
 		else {
 			expect(emails).toHaveLength(1);
 			expect(emails[0]).toContain(expectedEmail);
-			expect(emails[0]).not.toContain("recovery");
 		}
 	});
 }
 
-test("HTTP, network, malformed and stalled health checks remain distinct and never erase failed jobs", async () => {
-	const failedJobs = structuredClone(healthy);
-	failedJobs.checks.queue.details.failed = 1;
+test("HTTP, network, malformed and stalled health checks remain distinct", async () => {
 	const examples = [
 		{
 			issue: "The analytics service returned an error",
@@ -935,52 +844,39 @@ test("HTTP, network, malformed and stalled health checks remain distinct and nev
 	];
 	const log = spyOn(console, "info").mockImplementation(() => {});
 	for (const example of examples) {
-		const fixture = healthScenario([failedJobs], { ready: example.ready });
+		const fixture = healthScenario([healthy], { ready: example.ready });
 		const wait = mock(skipWait);
 		await checkOperations(environment(), now, fixture.send, 10, wait);
 		expect(wait).toHaveBeenCalledTimes(1);
 		expect(fixture.emails).toHaveLength(1);
 		expect(fixture.emails[0].body).toContain(example.issue);
-		expect(fixture.emails[0].body).toContain(
-			"The old analytics queue has failed jobs",
-		);
 	}
 	expect(JSON.stringify(log.mock.calls)).not.toContain("secret");
 });
 
 test("a malformed second response alerts instead of treating an uncertain recovery as healthy", async () => {
 	const fixture = healthScenario([
-		unhealthyRecovery({ stalled: true }),
 		{
-			status: "ok",
-			checks: {
-				queue: { status: "ok", details: { failed: 1, waiting: "bad" } },
-			},
+			...healthy,
+			status: "degraded",
+			checks: { ...healthy.checks, backup: { status: "error" } },
 		},
+		{ status: "ok", checks: {} },
 	]);
 	await checkOperations(environment(), now, fixture.send, 12_000, skipWait);
 	expect(fixture.emails).toHaveLength(1);
 	expect(fixture.emails[0].body).toContain("health report wasn't understood");
-	expect(fixture.emails[0].body).toContain(
-		"The old analytics queue has failed jobs",
-	);
-	expect(fixture.emails[0].body).not.toContain("stopped making progress");
 });
 
-test("HTTP 503 cannot be hidden by a healthy component body containing failed jobs", async () => {
-	const value = structuredClone(healthy);
-	value.checks.queue.details.failed = 1;
+test("HTTP 503 cannot be hidden by a healthy component body", async () => {
 	const fixture = healthScenario([], {
-		detailed: async () => Response.json(value, { status: 503 }),
+		detailed: async () => Response.json(healthy, { status: 503 }),
 	});
 	const wait = mock(skipWait);
 	await checkOperations(environment(), now, fixture.send, 12_000, wait);
 	expect(wait).toHaveBeenCalledTimes(1);
 	expect(fixture.emails[0].body).toContain(
 		"The analytics service returned an error",
-	);
-	expect(fixture.emails[0].body).toContain(
-		"The old analytics queue has failed jobs",
 	);
 });
 

@@ -9,7 +9,7 @@ import {
 import { ingestWriteSecret, opsSecret } from "./ingest-auth";
 import type { Bindings, QueuedClick } from "./types";
 
-export { readFailedArchive } from "./failed-clicks";
+export { failedClickKeys, readFailedArchive } from "./failed-clicks";
 
 export async function replayFailedClick(
 	key: string,
@@ -74,10 +74,12 @@ export async function resolveFailedClick(
 		redirect: "manual",
 		signal: AbortSignal.timeout(10_000),
 	});
-	if (response.status !== 200)
+	if (response.status !== 200) {
+		await response.body?.cancel();
 		throw new Error(
 			"Ingest receipt could not be verified; the failure remains unresolved",
 		);
+	}
 	const receipt = await response.json<{
 		idempotency_key?: unknown;
 		committed?: unknown;

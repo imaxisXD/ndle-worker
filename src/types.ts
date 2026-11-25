@@ -113,30 +113,6 @@ export type ABTestConfig = {
 	distribution: "weighted_random" | "deterministic";
 };
 
-export type HealthStatus =
-	| "healthy"
-	| "slow"
-	| "unstable"
-	| "down"
-	| "timeout"
-	| "error"
-	| "redirect_loop"
-	| "ssl_error"
-	| "dns_error";
-
-export type HealthCheckEvent = {
-	url_id: string;
-	destination_url: string;
-	check_timestamp: string;
-	response_status: number;
-	response_time_ms: number;
-	is_healthy: boolean;
-	health_status: HealthStatus;
-	error_message?: string;
-	worker_datacenter: string;
-	worker_version: string;
-};
-
 export type RedisValueObject = {
 	destination: string;
 	user_id?: string | null;
@@ -156,8 +132,6 @@ export type RedisValueObject = {
 	tags: string[];
 	utm_params: Record<string, string>;
 	rules: {
-		geo?: Record<string, string>;
-		device?: Record<string, string>;
 		ab_test?: ABTestConfig;
 	};
 	features: {
@@ -166,6 +140,4 @@ export type RedisValueObject = {
 	};
 	custom_metadata: Record<string, unknown>;
 	version: number;
-	last_health_check?: number;
-	health_check_frequency_ms?: number;
 };

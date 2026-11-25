@@ -8,3 +8,5 @@ onlyBuiltDependencies:
   - esbuild
   - sharp
   - workerd
+minimumReleaseAgeExclude:
+  - hono@4.13.22

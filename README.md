@@ -48,10 +48,10 @@ must answer HTTP 200 with `success: true` and one result per event, in order, wi
 the matching `index` and `idempotency_key` and a status of `recorded`,
 `duplicate`, `ignored`, `invalid` or `conflict`. A 200 means every `recorded` or
 `duplicate` event is committed. Any other status, a malformed 200 or a network
-failure retries every message in that request. A 404 means ingest does not have
-the batch route yet: each event then goes to `POST /ingest` as before, which
-requires a 202 with `success: true`, the same `idempotency_key` and
-`status: queued` (extra fields such as `committed` are ignored).
+failure retries every message in that request. Operator recovery uses the
+single-event `POST /ingest` route, which requires a 202 with `success: true`,
+the same `idempotency_key` and `status: queued` (extra fields such as
+`committed` are ignored).
 
 Per event, `recorded` and `duplicate` update the Convex live view with the same
 event ID, at most 10 Convex writes at a time to limit contention on busy links.
@@ -75,10 +75,12 @@ previous optional `ANALYTICS_ENDPOINT`/Tinybird fanout is removed; ingest is the
 durable analytics authority. A new external sink must consume that retained
 stream with its own deduplication and retry policy.
 
-The destination decision and existing deterministic A/B assignment are preserved.
-The legacy assignment uses an IP-derived key. Changing that to include user agent
-or a cookie would move existing visitors between variants, so introduce an
-explicit assignment version for new experiments before making that change.
+The destination decision and deterministic A/B assignment are preserved.
+Deterministic assignment hashes `${linkId}\n${ip}\n${userAgent}` with SHA-256,
+so a visitor keeps the same variant on repeat clicks while each link splits
+visitors independently. Changing that key (for example, to a cookie) would move
+existing visitors between variants, so introduce an explicit assignment version
+for new experiments before making that change.
 
 ## Domains and secrets
 
@@ -223,12 +225,9 @@ old, its backlog exceeds 10,000 messages or 100 MB, or the failed-click queue
 contains any message. A bounded R2 listing also alerts while any archived failed
 message is unresolved, even after the failed queue empties; an unreadable archive
 raises its own alert. Checks also cover ingest readiness and detailed component
-health, any failed ingest job, more than 1,000 waiting ingest jobs, monitoring
-readiness, and a missing/invalid backup or a latest backup older than 26 hours.
-The database, writer, archive and backup components are required. Older ingest
-versions report `queue` and `recovery`; newer ones drop those and report the
-event `journal`. Each of these is checked only when present, so either version
-passes without false alerts.
+health (`duckdb`, `batch_writer`, `archiver`, `backup`, and `journal` are all
+required), monitoring readiness, and a missing/invalid backup or a latest backup
+older than 26 hours.
 The backup check reads only the latest manifest and the referenced object's
 metadata; checksum verification remains the database owner's backup duty.
 

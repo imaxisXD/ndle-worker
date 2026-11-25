@@ -1,16 +1,27 @@
 import type { RedisValueObject } from "./types";
 
-const defaultShortLinkHosts = ["ndle.fyi", "www.ndle.fyi"];
+const trailingDotRegex = /\.$/;
+const defaultShortLinkHosts = new Set(["ndle.fyi", "www.ndle.fyi"]);
+
+let cachedShortLinkHostsRaw: string | undefined;
+let cachedShortLinkHosts: Set<string> | undefined;
 
 type LinkDomainDecision = "allowed" | "legacy" | "denied";
 
 function normalizeHost(host: string): string {
-	return host.trim().toLowerCase().replace(/\.$/, "");
+	return host.trim().toLowerCase().replace(trailingDotRegex, "");
 }
 
 function parseShortLinkHosts(value: string | undefined): Set<string> {
-	const hosts = (value ?? "").split(",").map(normalizeHost).filter(Boolean);
-	return new Set(hosts.length ? hosts : defaultShortLinkHosts);
+	if (!value) return defaultShortLinkHosts;
+	if (cachedShortLinkHosts && cachedShortLinkHostsRaw === value) {
+		return cachedShortLinkHosts;
+	}
+	const hosts = value.split(",").map(normalizeHost).filter(Boolean);
+	const parsed = hosts.length ? new Set(hosts) : defaultShortLinkHosts;
+	cachedShortLinkHostsRaw = value;
+	cachedShortLinkHosts = parsed;
+	return parsed;
 }
 
 /**

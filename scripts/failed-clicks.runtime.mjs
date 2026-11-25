@@ -131,24 +131,21 @@ const bundled = await build({
 const healthyOperations = {
 	status: "ok",
 	checks: {
-		queue: { status: "ok", details: { waiting: 0, failed: 0 } },
 		duckdb: { status: "ok" },
 		batch_writer: { status: "ok" },
 		archiver: { status: "ok" },
 		backup: { status: "ok" },
-		recovery: { status: "ok", details: {} },
+		journal: { status: "ok", details: { writes: { failing: false } } },
 	},
 };
-const recoveryFailure = {
+const journalFailure = {
 	...healthyOperations,
 	status: "degraded",
 	checks: {
 		...healthyOperations.checks,
-		recovery: {
+		journal: {
 			status: "degraded",
 			details: {
-				unavailable: true,
-				auditOverdue: true,
 				lastError: "PRIVATE-service-secret",
 			},
 		},
@@ -446,11 +443,11 @@ try {
 	);
 	const confirmationStarted = Date.now();
 	await run(
-		"temporary recovery failure clears after the real 15-second workerd timer",
+		"temporary journal failure clears after the real 15-second workerd timer",
 		{
 			action: "operations",
 			cleanArchive: true,
-			healthSamples: [recoveryFailure, healthyOperations],
+			healthSamples: [journalFailure, healthyOperations],
 			realConfirmationTimer: true,
 		},
 		(result) => {
@@ -475,11 +472,11 @@ try {
 		},
 	);
 	await run(
-		"persistent recovery failures send specific safe messages after one confirmation",
+		"persistent journal failures send specific safe messages after one confirmation",
 		{
 			action: "operations",
 			cleanArchive: true,
-			healthSamples: [recoveryFailure],
+			healthSamples: [journalFailure],
 		},
 		(result) => {
 			assert.equal(result.accepted, true);
@@ -489,33 +486,31 @@ try {
 			);
 			const emails = outbound.filter((call) => call.email);
 			assert.equal(emails.length, 1);
-			assert.match(emails[0].email.text, /An old analytics scan is overdue/);
-			assert.match(emails[0].email.text, /Old analytics recovery hasn't checked in/);
+			assert.match(
+				emails[0].email.text,
+				/The off-site copy of new clicks had a problem/,
+			);
 			assert.doesNotMatch(emails[0].email.text, /PRIVATE-service-secret/);
 		},
 	);
 	await run(
-		"health recovery retains initially failed jobs and actual unresolved R2 archives",
+		"health recovery retains actual unresolved R2 archives",
 		{
 			action: "operations",
-			healthSamples: [
-				{
-					...recoveryFailure,
-					checks: {
-						...recoveryFailure.checks,
-						queue: { status: "ok", details: { waiting: 0, failed: 1 } },
-					},
-				},
-				healthyOperations,
-			],
+			healthSamples: [journalFailure, healthyOperations],
 		},
 		(result) => {
 			assert.equal(result.accepted, true);
 			const emails = outbound.filter((call) => call.email);
 			assert.equal(emails.length, 1);
-			assert.match(emails[0].email.text, /The old analytics queue has failed jobs/);
-			assert.match(emails[0].email.text, /Failed clicks are waiting for you to replay them/);
-			assert.doesNotMatch(emails[0].email.text, /recovery check failed/);
+			assert.match(
+				emails[0].email.text,
+				/Failed clicks are waiting for you to replay them/,
+			);
+			assert.doesNotMatch(
+				emails[0].email.text,
+				/The off-site copy of new clicks had a problem/,
+			);
 		},
 	);
 	await run(
@@ -590,32 +585,18 @@ try {
 		);
 	}
 	await run(
-		"main-queue delivery falls back to per-click ingest without the batch route",
+		"main-queue delivery retries when /ingest/batch returns 404 without falling back",
 		{ id: "no-batch-route", queue: mainQueue, noBatchRoute: true },
 		(result) => {
-			assert.equal(result.acked, 1);
+			assert.equal(result.acked, 0);
+			assert.equal(result.retried, 1);
 			assert.deepEqual(
 				outbound
 					.map((call) => new URL(call.url))
 					.filter((url) => url.hostname === "ingest.example.test")
 					.map((url) => url.pathname),
-				["/ingest/batch", "/ingest"],
+				["/ingest/batch"],
 			);
-			assert.equal(ingestIds.size, 1);
-			assert.equal(convexIds.size, 1);
-		},
-	);
-	await run(
-		"tracked event ignored by per-click ingest is retried without a Convex write",
-		{
-			id: "false-ignored",
-			queue: mainQueue,
-			falseIgnored: true,
-			noBatchRoute: true,
-		},
-		(result) => {
-			assert.equal(result.acked, 0);
-			assert.equal(result.retried, 1);
 			assert.equal(
 				outbound.some((call) => call.url.includes("fixture.convex.cloud")),
 				false,

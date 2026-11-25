@@ -86,9 +86,7 @@ try {
 		target: "node22",
 	});
 	const recovery = await import(pathToFileURL(library).href);
-	if (typeof messageId !== "string" || !/^[A-Za-z0-9_-]{1,128}$/.test(messageId))
-		throw new Error("Supply the exact original message ID");
-	const key = `failed-clicks/v1/archive/${sourceQueue}/${messageId}.json`;
+	const { archive: key } = recovery.failedClickKeys(sourceQueue, messageId);
 	if (command === "inspect") {
 		const archive = await recovery.readFailedArchive(bucket, key);
 		const text = JSON.stringify(archive);

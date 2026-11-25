@@ -1,12 +1,13 @@
 import { type Context, Hono } from "hono";
 import { normalizeAnalyticsEvent } from "./analytics";
 import { parseQueuedClick } from "./click-envelope";
+import { buildAnalyticsInput } from "./click-event";
+import { getBooleanEnv } from "./guards";
 import {
-	buildAnalyticsInput,
 	buildClientRedirectResponse,
 	buildNoContentResponse,
-	getBooleanEnv,
-} from "./helper";
+	buildUnavailableResponse,
+} from "./http-responses";
 import { checkLinkDomain } from "./link-domain";
 import { createRequestLogger } from "./log";
 import { checkOperations } from "./operations";
@@ -33,96 +34,93 @@ app.get("/:websiteSlug{[A-Za-z0-9_-]+}", async (c) => {
 	const start = Date.now();
 	const slug = c.req.param("websiteSlug");
 	const requestId = crypto.randomUUID();
-	const log = createRequestLogger(c, { slug, request_id: requestId });
+	const requestUrl = new URL(c.req.url);
+	const log = createRequestLogger(c, requestUrl, {
+		slug,
+		request_id: requestId,
+	});
 	// Link checkers (previews, uptime tools, email scanners) often send HEAD
 	// first. Answer with the same redirect, but never count it as a click.
 	const isHead = c.req.method === "HEAD";
-	if (c.req.method !== "GET" && !isHead)
-		return c.text("Method not allowed", 405);
+
+	let redisValue: RedisValueObject | null;
 	try {
-		const redisValue = await linkStore(c.env).json.get<RedisValueObject>(slug);
-		if (!redisValue) return c.notFound();
-		const domainDecision = checkLinkDomain({
-			host: new URL(c.req.url).hostname,
-			domain: redisValue.domain,
-			shortLinkHosts: c.env.SHORT_LINK_HOSTS,
-		});
-		if (domainDecision === "denied") {
-			// Indistinguishable from a missing link, and never tracked.
-			log.info("Link cannot be opened", {
-				reason: "link is not served on this domain",
-			});
-			return c.notFound();
-		}
-		if (domainDecision === "legacy") {
-			log.info("Link record has no domain binding yet", {
-				reason: "legacy_domain_projection",
-			});
-		}
-		const decision = await decideRedirect({
-			redisValue,
-			readHeader: (name) => c.req.header(name),
-		});
-		if (decision.kind === "blocked") {
-			log.info("Link cannot be opened", { reason: decision.reason });
-			return c.notFound();
-		}
-		const trackingEnabled =
-			!isHead &&
-			getBooleanEnv(c.env.TRACKING_ENABLED, true) &&
-			redisValue.features?.track_clicks !== false;
-		// Analytics never decides whether a visitor reaches the destination.
-		// Normally the queue accepts the click before the redirect is sent; if
-		// it cannot within a short wait, the click is kept after the response.
-		let clickQueued: boolean | null = null;
-		if (trackingEnabled) {
-			try {
-				const click = parseQueuedClick({
-					version: 1,
-					event: normalizeAnalyticsEvent(
-						await buildAnalyticsInput(
-							c,
-							decision.destination.toString(),
-							slug,
-							Date.now() - start,
-							redisValue,
-							decision.variantId,
-							requestId,
-						),
-					),
-				});
-				clickQueued = await sendClick(c.env.CLICK_EVENTS, click);
-				if (!clickQueued) runAfterResponse(c, spoolClick(c.env, click, log));
-			} catch (error) {
-				// A link record that cannot produce a valid event still redirects.
-				clickQueued = false;
-				log.error("Click could not be recorded for this redirect", { error });
-			}
-		}
-		log.info("Redirect ready", {
-			status: 302,
-			latency_ms: Date.now() - start,
-			tracking_enabled: trackingEnabled,
-			click_queued: clickQueued,
-		});
-		return buildClientRedirectResponse(decision.destination);
+		redisValue = await linkStore(c.env).json.get<RedisValueObject>(slug);
 	} catch (error) {
 		log.error("Link could not be opened right now", {
 			error,
 			latency_ms: Date.now() - start,
 		});
-		return new Response(
-			"This link is temporarily unavailable. Please try again.",
-			{
-				status: 503,
-				headers: {
-					"Cache-Control": "no-store",
-					"Retry-After": "5",
-					"Content-Type": "text/plain; charset=utf-8",
-				},
-			},
-		);
+		return buildUnavailableResponse();
 	}
+
+	if (!redisValue) return c.notFound();
+	const domainDecision = checkLinkDomain({
+		host: requestUrl.hostname,
+		domain: redisValue.domain,
+		shortLinkHosts: c.env.SHORT_LINK_HOSTS,
+	});
+	if (domainDecision === "denied") {
+		// Indistinguishable from a missing link, and never tracked.
+		log.info("Link cannot be opened", {
+			reason: "link is not served on this domain",
+		});
+		return c.notFound();
+	}
+	if (domainDecision === "legacy") {
+		log.info("Link record has no domain binding yet", {
+			reason: "legacy_domain_projection",
+		});
+	}
+	const decision = await decideRedirect({
+		redisValue,
+		readHeader: (name) => c.req.header(name),
+	});
+	if (decision.kind === "blocked") {
+		log.info("Link cannot be opened", { reason: decision.reason });
+		return c.notFound();
+	}
+	const trackingEnabled =
+		!isHead &&
+		getBooleanEnv(c.env.TRACKING_ENABLED, true) &&
+		redisValue.features?.track_clicks !== false;
+	// Analytics never decides whether a visitor reaches the destination.
+	// Normally the queue accepts the click before the redirect is sent; if
+	// it cannot within a short wait, the click is kept after the response.
+	let clickQueued: boolean | null = null;
+	if (trackingEnabled) {
+		try {
+			const click = parseQueuedClick({
+				version: 1,
+				event: normalizeAnalyticsEvent(
+					await buildAnalyticsInput({
+						c,
+						requestUrl,
+						destinationUrl: decision.destination.toString(),
+						slug,
+						latencyMs: Date.now() - start,
+						trackingEnabled,
+						redisValue,
+						variantId: decision.variantId,
+						requestId,
+					}),
+				),
+			});
+			clickQueued = await sendClick(c.env.CLICK_EVENTS, click);
+			if (!clickQueued) runAfterResponse(c, spoolClick(c.env, click, log));
+		} catch (error) {
+			// A link record that cannot produce a valid event still redirects.
+			clickQueued = false;
+			log.error("Click could not be recorded for this redirect", { error });
+		}
+	}
+	log.info("Redirect ready", {
+		status: 302,
+		latency_ms: Date.now() - start,
+		tracking_enabled: trackingEnabled,
+		click_queued: clickQueued,
+	});
+	return buildClientRedirectResponse(decision.destination);
 });
 
 function runAfterResponse(

@@ -1,11 +1,8 @@
 import { expect, test } from "bun:test";
-import {
-	assertSafeDestinationUrl,
-	buildClientRedirectResponse,
-	hashVisitorIp,
-	isBot,
-	sha256Hex,
-} from "./helper";
+import { hashVisitorIp, sha256Hex } from "./crypto";
+import { buildClientRedirectResponse } from "./http-responses";
+import { appendUtmParamsToUrl, assertSafeDestinationUrl } from "./url-safety";
+import { getBrowser, getDeviceType, getOS, isBot } from "./user-agent";
 
 test("a keyed visitor hash is hex HMAC-SHA256", async () => {
 	// RFC 4231 test case 2.
@@ -50,6 +47,21 @@ test("private and special IPv6 destinations are refused, public ones allowed", (
 		);
 });
 
+test("appendUtmParamsToUrl avoids cloning when nothing changes and never mutates input", () => {
+	const original = new URL("https://example.com/?utm_source=kept");
+	const unchanged = appendUtmParamsToUrl(original, { utm_source: "new" });
+	expect(unchanged).toBe(original);
+	const updated = appendUtmParamsToUrl(original, {
+		utm_source: "new",
+		utm_medium: "email",
+	});
+	expect(updated).not.toBe(original);
+	expect(original.toString()).toBe("https://example.com/?utm_source=kept");
+	expect(updated.toString()).toBe(
+		"https://example.com/?utm_source=kept&utm_medium=email",
+	);
+});
+
 test("browser clicks are people; scripts, previews and scanners are bots", () => {
 	const chrome =
 		"Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/129.0.0.0 Safari/537.36";
@@ -72,6 +84,50 @@ test("browser clicks are people; scripts, previews and scanners are bots", () =>
 		"Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) HeadlessChrome/129.0.0.0",
 	])
 		expect(isBot(automated)).toBe(true);
+});
+
+test("unrecognized Sec-CH-UA and Sec-CH-UA-Platform never store arbitrary visitor text", () => {
+	const chromeMacUa =
+		"Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/129.0.0.0 Safari/537.36";
+	// Known Client Hints resolve to canonical names.
+	expect(
+		getBrowser(chromeMacUa, '"Not_A Brand";v="8", "Microsoft Edge";v="129"'),
+	).toBe("Edge");
+	expect(getBrowser(chromeMacUa, '"Brave";v="129", "Chromium";v="129"')).toBe(
+		"Brave",
+	);
+	expect(getOS(chromeMacUa, '"macOS"')).toBe("macOS");
+	expect(getOS(chromeMacUa, '"Chrome OS"')).toBe("ChromeOS");
+
+	// Unrecognized Client Hints fall back to User-Agent parsing when recognizable.
+	expect(getBrowser(chromeMacUa, '"SpoofedBrowser";v="1"')).toBe("Chrome");
+	expect(getOS(chromeMacUa, '"SpoofedOS"')).toBe("macOS Catalina+");
+
+	// When neither Client Hints nor UA matches, return "Other" instead of echoing visitor text.
+	expect(getBrowser("Mozilla/5.0 custom", '"SpoofedBrowser";v="1"')).toBe(
+		"Other",
+	);
+	expect(getOS("Mozilla/5.0 custom", '"FreeBSD"')).toBe("Other");
+
+	// Missing hints with an unrecognizable UA remain "Unknown".
+	expect(getBrowser("Mozilla/5.0 custom")).toBe("Unknown");
+	expect(getOS("Mozilla/5.0 custom")).toBe("Unknown");
+	expect(getOS("Mozilla/5.0 custom", '"Unknown"')).toBe("Unknown");
+});
+
+test("device type detects mobile hints, tablets, mobiles, and desktop defaults", () => {
+	expect(getDeviceType("Mozilla/5.0 (X11; Linux x86_64)", "?1")).toBe("mobile");
+	expect(getDeviceType("Mozilla/5.0 (iPad; CPU OS 17_0 like Mac OS X)")).toBe(
+		"tablet",
+	);
+	expect(
+		getDeviceType("Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X)"),
+	).toBe("mobile");
+	expect(getDeviceType("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7)")).toBe(
+		"desktop",
+	);
+	expect(getDeviceType("CustomClient/1.0")).toBe("desktop");
+	expect(getDeviceType("")).toBe("Unknown");
 });
 
 test("redirects no longer ask the browser to repeat the first visit for hints", () => {

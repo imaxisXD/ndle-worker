@@ -1,10 +1,7 @@
 import { afterEach, expect, mock, spyOn, test } from "bun:test";
-import { ConvexHttpClient } from "convex/browser";
-import {
-	consumeClicks,
-	deliverClick,
-	parseQueuedClick,
-} from "./click-delivery";
+import { consumeClicks, deliverClick } from "./click-delivery";
+import { parseQueuedClick } from "./click-envelope";
+import type { RecordClickArgs } from "./convex-api";
 import { resolveFailedClick } from "./failed-click-recovery";
 import { bodyHash, failedClickKeys } from "./failed-clicks";
 import { createLogger } from "./log";
@@ -95,26 +92,7 @@ type IngestRequest = {
 	authorization: string | null;
 	events: AnalyticsEvent[];
 };
-// Intercepts ingest HTTP. Batch bodies are `{ events }`; single bodies are one event.
-function mockIngest(
-	respond: (
-		request: IngestRequest,
-	) => Response | undefined | Promise<Response | undefined>,
-) {
-	const requests: IngestRequest[] = [];
-	spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
-		const path = new URL(String(input)).pathname;
-		const body = JSON.parse(String(init?.body));
-		const request = {
-			path,
-			authorization: new Headers(init?.headers).get("Authorization"),
-			events: path.endsWith("/batch") ? body.events : [body],
-		};
-		requests.push(request);
-		return (await respond(request)) ?? batchResults(request);
-	});
-	return requests;
-}
+
 function batchResults(
 	{ events }: IngestRequest,
 	status: (event: AnalyticsEvent) => string = () => "recorded",
@@ -128,25 +106,66 @@ function batchResults(
 		})),
 	});
 }
-function recordInConvex(outcome: unknown = { outcome: "recorded" }) {
-	return spyOn(ConvexHttpClient.prototype, "mutation").mockResolvedValue(
-		outcome,
+
+type MockTransportOptions = {
+	ingest?: (
+		request: IngestRequest,
+	) => Response | undefined | Promise<Response | undefined>;
+	convex?: (args: RecordClickArgs) => unknown | Promise<unknown>;
+};
+
+// Intercepts both ingest HTTP and Convex `/api/mutation` HTTP calls.
+function mockTransport(options: MockTransportOptions = {}) {
+	const ingestRequests: IngestRequest[] = [];
+	const convexCalls: RecordClickArgs[] = [];
+	const convexHandler =
+		options.convex ?? (async () => ({ outcome: "recorded" }));
+
+	const fetchSpy = spyOn(globalThis, "fetch").mockImplementation(
+		async (input, init) => {
+			const url = new URL(String(input));
+			const path = url.pathname;
+			if (path === "/api/mutation") {
+				const parsed = JSON.parse(String(init?.body)) as {
+					args: [RecordClickArgs];
+				};
+				const args = parsed.args[0];
+				convexCalls.push(args);
+				try {
+					const value = await convexHandler(args);
+					return Response.json({ status: "success", value });
+				} catch (error) {
+					return Response.json(
+						{
+							status: "error",
+							errorMessage:
+								error instanceof Error ? error.message : String(error),
+						},
+						{ status: 560 },
+					);
+				}
+			}
+			const body = JSON.parse(String(init?.body));
+			const request: IngestRequest = {
+				path,
+				authorization: new Headers(init?.headers).get("Authorization"),
+				events: path.endsWith("/batch") ? body.events : [body],
+			};
+			ingestRequests.push(request);
+			return (await options.ingest?.(request)) ?? batchResults(request);
+		},
 	);
+	return { ingestRequests, convexCalls, fetchSpy };
 }
-const convexRequestIds = (mutation: ReturnType<typeof recordInConvex>) =>
-	mutation.mock.calls.map(
-		(call) => (call[1] as { requestId: string }).requestId,
-	);
 
 test("retries a rejected ingest response without acknowledging or updating live counts", async () => {
-	const send = spyOn(globalThis, "fetch").mockResolvedValue(
-		new Response(null, { status: 503 }),
-	);
-	const mutation = recordInConvex();
+	const { ingestRequests, convexCalls } = mockTransport({
+		ingest: () => new Response(null, { status: 503 }),
+	});
 	const item = message();
 	await deliver(item);
-	expect(send).toHaveBeenCalledTimes(1);
-	expect(mutation).not.toHaveBeenCalled();
+	expect(ingestRequests).toHaveLength(1);
+	expect(convexCalls).toHaveLength(0);
 	expect(item.ack).not.toHaveBeenCalled();
 	expect(item.retry).toHaveBeenCalledWith({ delaySeconds: 10 });
 });
@@ -162,22 +181,25 @@ test("retries network errors instead of losing the queued event", async () => {
 });
 
 test("replay keeps one event ID when Convex fails after ingest commits", async () => {
-	const requests = mockIngest(() => undefined);
-	const mutation = spyOn(ConvexHttpClient.prototype, "mutation")
-		.mockRejectedValueOnce(new Error("Convex unavailable"))
-		.mockResolvedValueOnce({ outcome: "duplicate" });
+	let convexAttempts = 0;
+	const { ingestRequests, convexCalls } = mockTransport({
+		convex: async () => {
+			convexAttempts++;
+			if (convexAttempts === 1) throw new Error("Convex unavailable");
+			return { outcome: "duplicate" };
+		},
+	});
 	const first = message();
 	await deliver(first);
 	const retry = message();
 	await deliver(retry);
 	expect(first.retry).toHaveBeenCalledTimes(1);
 	expect(retry.ack).toHaveBeenCalledTimes(1);
-	expect(requests.map((request) => request.events[0].idempotency_key)).toEqual([
-		event.idempotency_key,
-		event.idempotency_key,
-	]);
-	for (const call of mutation.mock.calls) {
-		expect(call[1]).toMatchObject({
+	expect(
+		ingestRequests.map((request) => request.events[0].idempotency_key),
+	).toEqual([event.idempotency_key, event.idempotency_key]);
+	for (const call of convexCalls) {
+		expect(call).toMatchObject({
 			requestId: event.idempotency_key,
 			clickEvent: { occurredAt: Date.parse(event.occurred_at) },
 		});
@@ -192,8 +214,7 @@ for (const outcome of [
 	"too_old",
 ]) {
 	test(`acknowledges the explicit Convex outcome ${outcome}`, async () => {
-		mockIngest(() => undefined);
-		recordInConvex({ outcome });
+		mockTransport({ convex: async () => ({ outcome }) });
 		const item = message();
 		await deliver(item);
 		expect(item.ack).toHaveBeenCalledTimes(1);
@@ -202,8 +223,7 @@ for (const outcome of [
 }
 
 test("an unknown Convex result is not mistaken for a recorded click", async () => {
-	mockIngest(() => undefined);
-	recordInConvex({ processed: false });
+	mockTransport({ convex: async () => ({ processed: false }) });
 	const item = message();
 	await deliver(item);
 	expect(item.ack).not.toHaveBeenCalled();
@@ -235,8 +255,7 @@ test("malformed queued events retry if durable archival is unavailable", async (
 });
 
 test("one batch request carries every tracked click in queue order", async () => {
-	const requests = mockIngest(() => undefined);
-	const mutation = recordInConvex();
+	const { ingestRequests, convexCalls } = mockTransport();
 	const clicks = Array.from({ length: 25 }, (_, index) =>
 		click(`event-${index}`),
 	);
@@ -246,10 +265,10 @@ test("one batch request carries every tracked click in queue order", async () =>
 		"malformed",
 	);
 	await consume([disabled, ...clicks, malformed]);
-	expect(requests).toHaveLength(1);
-	expect(requests[0].path).toBe("/ingest/batch");
-	expect(requests[0].authorization).toBe("Bearer test");
-	expect(requests[0].events).toEqual(
+	expect(ingestRequests).toHaveLength(1);
+	expect(ingestRequests[0].path).toBe("/ingest/batch");
+	expect(ingestRequests[0].authorization).toBe("Bearer test");
+	expect(ingestRequests[0].events).toEqual(
 		clicks.map((item) => (item.body as { event: AnalyticsEvent }).event),
 	);
 	for (const item of [...clicks, disabled]) {
@@ -257,30 +276,28 @@ test("one batch request carries every tracked click in queue order", async () =>
 		expect(item.retry).not.toHaveBeenCalled();
 	}
 	expect(malformed.retry).toHaveBeenCalledTimes(1);
-	expect(convexRequestIds(mutation).sort()).toEqual(
+	expect(convexCalls.map((call) => call.requestId).sort()).toEqual(
 		clicks.map((_, index) => `event-${index}`).sort(),
 	);
 });
 
 test("more than 100 clicks are split into batches of at most 100", async () => {
-	const requests = mockIngest(() => undefined);
-	recordInConvex();
+	const { ingestRequests } = mockTransport();
 	const clicks = Array.from({ length: 205 }, (_, index) =>
 		click(`event-${index}`),
 	);
 	await consume(clicks);
-	expect(requests.map((request) => request.events.length)).toEqual([
+	expect(ingestRequests.map((request) => request.events.length)).toEqual([
 		100, 100, 5,
 	]);
-	expect(requests.flatMap((request) => request.events)).toHaveLength(205);
+	expect(ingestRequests.flatMap((request) => request.events)).toHaveLength(205);
 	for (const item of clicks) expect(item.ack).toHaveBeenCalledTimes(1);
 });
 
 test("each batch result decides its own click's outcome", async () => {
-	mockIngest((request) =>
-		batchResults(request, (item) => item.idempotency_key),
-	);
-	const mutation = recordInConvex();
+	const { convexCalls } = mockTransport({
+		ingest: (request) => batchResults(request, (item) => item.idempotency_key),
+	});
 	const [recorded, duplicate, ignored, invalid, conflict] = [
 		"recorded",
 		"duplicate",
@@ -298,25 +315,28 @@ test("each batch result decides its own click's outcome", async () => {
 		expect(item.ack).not.toHaveBeenCalled();
 		expect(item.retry).toHaveBeenCalledWith({ delaySeconds: 10 });
 	}
-	expect(convexRequestIds(mutation).sort()).toEqual(["duplicate", "recorded"]);
+	expect(convexCalls.map((call) => call.requestId).sort()).toEqual([
+		"duplicate",
+		"recorded",
+	]);
 });
 
 test("an invalid result may omit the key it could not read", async () => {
-	mockIngest(({ events }) =>
-		Response.json({
-			success: true,
-			results: events.map((item, index) =>
-				index === 0
-					? { index, idempotency_key: null, status: "invalid" }
-					: {
-							index,
-							idempotency_key: item.idempotency_key,
-							status: "recorded",
-						},
-			),
-		}),
-	);
-	recordInConvex();
+	mockTransport({
+		ingest: ({ events }) =>
+			Response.json({
+				success: true,
+				results: events.map((item, index) =>
+					index === 0
+						? { index, idempotency_key: null, status: "invalid" }
+						: {
+								index,
+								idempotency_key: item.idempotency_key,
+								status: "recorded",
+							},
+				),
+			}),
+	});
 	const [unreadable, recorded] = [click("unreadable"), click("recorded")];
 	await consume([unreadable, recorded]);
 	expect(unreadable.retry).toHaveBeenCalledTimes(1);
@@ -324,25 +344,25 @@ test("an invalid result may omit the key it could not read", async () => {
 });
 
 test("bot clicks are committed by ingest but never update live counts", async () => {
-	mockIngest(() => undefined);
-	const mutation = recordInConvex();
+	const { convexCalls } = mockTransport();
 	const [bot, human] = [click("bot", { is_bot: true }), click("human")];
 	await consume([bot, human]);
 	expect(bot.ack).toHaveBeenCalledTimes(1);
 	expect(human.ack).toHaveBeenCalledTimes(1);
-	expect(convexRequestIds(mutation)).toEqual(["human"]);
+	expect(convexCalls.map((call) => call.requestId)).toEqual(["human"]);
 });
 
 test("Convex writes run at most 10 at a time", async () => {
-	mockIngest(() => undefined);
 	let active = 0;
 	let peak = 0;
-	spyOn(ConvexHttpClient.prototype, "mutation").mockImplementation(async () => {
-		active++;
-		peak = Math.max(peak, active);
-		await new Promise((resolve) => setTimeout(resolve, 5));
-		active--;
-		return { outcome: "recorded" };
+	mockTransport({
+		convex: async () => {
+			active++;
+			peak = Math.max(peak, active);
+			await new Promise((resolve) => setTimeout(resolve, 5));
+			active--;
+			return { outcome: "recorded" };
+		},
 	});
 	const clicks = Array.from({ length: 35 }, (_, index) =>
 		click(`event-${index}`),
@@ -353,14 +373,12 @@ test("Convex writes run at most 10 at a time", async () => {
 });
 
 test("a Convex failure retries only that click", async () => {
-	mockIngest(() => undefined);
-	spyOn(ConvexHttpClient.prototype, "mutation").mockImplementation(
-		async (_mutation, args) => {
-			if ((args as { requestId: string }).requestId === "failing")
-				throw new Error("Convex unavailable");
+	mockTransport({
+		convex: async (args) => {
+			if (args.requestId === "failing") throw new Error("Convex unavailable");
 			return { outcome: "recorded" };
 		},
-	);
+	});
 	const [before, failing, after] = ["before", "failing", "after"].map((id) =>
 		click(id),
 	);
@@ -373,17 +391,18 @@ test("a Convex failure retries only that click", async () => {
 	}
 });
 
-for (const status of [202, 400, 409, 413, 500, 503]) {
+for (const status of [202, 400, 404, 409, 413, 500, 503]) {
 	test(`a batch answered with HTTP ${status} retries every click`, async () => {
-		mockIngest(() => Response.json({ success: true }, { status }));
-		const mutation = recordInConvex();
+		const { convexCalls } = mockTransport({
+			ingest: () => Response.json({ success: true }, { status }),
+		});
 		const clicks = ["first", "second", "third"].map((id) => click(id));
 		await consume(clicks);
 		for (const item of clicks) {
 			expect(item.ack).not.toHaveBeenCalled();
 			expect(item.retry).toHaveBeenCalledWith({ delaySeconds: 10 });
 		}
-		expect(mutation).not.toHaveBeenCalled();
+		expect(convexCalls).toHaveLength(0);
 	});
 }
 
@@ -447,72 +466,44 @@ for (const [name, reply] of [
 	],
 ] as const) {
 	test(`a 200 batch response where ${name} retries every click`, async () => {
-		mockIngest(({ events }) => Response.json(reply(events)));
-		const mutation = recordInConvex();
+		const { convexCalls } = mockTransport({
+			ingest: ({ events }) => Response.json(reply(events)),
+		});
 		const clicks = ["first", "second"].map((id) => click(id));
 		await consume(clicks);
 		for (const item of clicks) {
 			expect(item.ack).not.toHaveBeenCalled();
 			expect(item.retry).toHaveBeenCalledTimes(1);
 		}
-		expect(mutation).not.toHaveBeenCalled();
+		expect(convexCalls).toHaveLength(0);
 	});
 }
 
 test("a 200 batch response that is not JSON retries every click", async () => {
-	mockIngest(() => new Response("committed", { status: 200 }));
+	mockTransport({
+		ingest: () => new Response("committed", { status: 200 }),
+	});
 	const clicks = ["first", "second"].map((id) => click(id));
 	await consume(clicks);
 	for (const item of clicks) expect(item.retry).toHaveBeenCalledTimes(1);
 });
 
-test("an ingest without the batch route falls back to per-click delivery", async () => {
-	const requests = mockIngest(({ path, events }) =>
-		path.endsWith("/batch")
-			? new Response("Not found", { status: 404 })
-			: Response.json(
-					{
-						success: true,
-						status: "queued",
-						idempotency_key: events[0].idempotency_key,
-						committed: true,
-						outcome: "recorded",
-					},
-					{ status: 202 },
-				),
-	);
-	const mutation = recordInConvex();
-	const clicks = ["first", "second", "third"].map((id) => click(id));
-	await consume(clicks);
-	expect(requests.map((request) => request.path)).toEqual([
-		"/ingest/batch",
-		"/ingest",
-		"/ingest",
-		"/ingest",
-	]);
-	expect(
-		requests.slice(1).map((request) => request.events[0].idempotency_key),
-	).toEqual(["first", "second", "third"]);
-	for (const item of clicks) expect(item.ack).toHaveBeenCalledTimes(1);
-	expect(mutation).toHaveBeenCalledTimes(3);
-});
-
 test("per-click delivery still refuses an ignored response for a tracked click", async () => {
-	mockIngest(({ events }) =>
-		Response.json(
-			{
-				success: true,
-				status: "ignored",
-				idempotency_key: events[0].idempotency_key,
-			},
-			{ status: 202 },
-		),
-	);
-	const mutation = recordInConvex();
+	const { convexCalls } = mockTransport({
+		ingest: ({ events }) =>
+			Response.json(
+				{
+					success: true,
+					status: "ignored",
+					idempotency_key: events[0].idempotency_key,
+				},
+				{ status: 202 },
+			),
+	});
 	await expect(deliverClick(event, env)).rejects.toThrow(
 		"did not confirm this event was accepted",
 	);
-	expect(mutation).not.toHaveBeenCalled();
+	expect(convexCalls).toHaveLength(0);
 });
 
 test("incomplete delivery settings retry every tracked click without sending", async () => {
@@ -540,6 +531,12 @@ function acceptIngest() {
 	const calls: Array<{ path: string; authorization: string | null }> = [];
 	spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
 		const url = new URL(String(input));
+		if (url.pathname === "/api/mutation") {
+			return Response.json({
+				status: "success",
+				value: { outcome: "recorded" },
+			});
+		}
 		calls.push({
 			path: url.pathname,
 			authorization: new Headers(init?.headers).get("Authorization"),
@@ -560,9 +557,6 @@ function acceptIngest() {
 					},
 					{ status: 202 },
 				);
-	});
-	spyOn(ConvexHttpClient.prototype, "mutation").mockResolvedValue({
-		outcome: "recorded",
 	});
 	return calls;
 }
@@ -625,13 +619,15 @@ for (const { secrets, write, ops } of scopedSecrets) {
 	});
 
 	test(`batch delivery authorizes ingest with ${write} given ${names}`, async () => {
-		const requests = mockIngest(() => undefined);
-		recordInConvex();
+		const { ingestRequests } = mockTransport();
 		const item = message();
 		await consume([item], secretEnv);
 		expect(item.ack).toHaveBeenCalledTimes(1);
 		expect(
-			requests.map(({ path, authorization }) => ({ path, authorization })),
+			ingestRequests.map(({ path, authorization }) => ({
+				path,
+				authorization,
+			})),
 		).toEqual([{ path: "/ingest/batch", authorization: `Bearer ${write}` }]);
 	});
 
@@ -682,8 +678,7 @@ for (const secrets of [
 }
 
 test("a click with a field ingest would reject is archived, not retried", async () => {
-	const requests = mockIngest(() => undefined);
-	recordInConvex();
+	const { ingestRequests } = mockTransport();
 	const objects = new Map<string, string>();
 	const bucket = {
 		async put(key: string, value: string) {
@@ -711,7 +706,7 @@ test("a click with a field ingest would reject is archived, not retried", async 
 	expect(() => parseQueuedClick(oversized.body)).toThrow(
 		"Click event has a field longer than ingest accepts",
 	);
-	expect(requests).toHaveLength(0);
+	expect(ingestRequests).toHaveLength(0);
 	for (const item of [oversized, longOwner]) {
 		expect(item.ack).toHaveBeenCalledTimes(1);
 		expect(item.retry).not.toHaveBeenCalled();

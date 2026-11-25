@@ -13,15 +13,16 @@ setup, checks, and deployment commands.
   links and invalid destinations return 404 from the route.
 - `src/ab-testing.ts` selects variants. Preserve existing deterministic assignment
   keys during cleanup because changing them can move visitors between variants.
-- `src/helper.ts` builds the 302 response and click data. Redirect responses use
+- `src/http-responses.ts`, `src/url-safety.ts`, `src/user-agent.ts`, and
+  `src/click-event.ts` build the 302 response, validate URLs, parse visitor
+  headers, and construct click events. Redirect responses use
   `Cache-Control: no-store`; there is no redirect cache.
 - Tracked redirects queue a click event through `src/redirect-tracking.ts`, which
   never blocks the redirect on analytics: a slow or failed queue send is retried
   and then archived for replay after the response. Only a failed link lookup
   answers 503. `src/click-delivery.ts` sends each queue
-  batch to ingest's batch route (falling back to per-event `/ingest` on a 404),
-  then records eligible human clicks in Convex. `src/convex-api.ts` holds the
-  reference to the single Convex mutation used by this service.
+  batch to ingest's batch route, then records eligible human clicks in Convex
+  via `src/convex-api.ts`.
 
 ## Configuration and validation
 

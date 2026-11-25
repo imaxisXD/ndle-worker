@@ -2,35 +2,44 @@ import type { ABTestConfig, ABVariant } from "./types";
 
 /**
  * Select a variant based on weighted random distribution.
- * Uses crypto for secure randomness.
+ * Uses crypto for uniform [0, 1) randomness and ignores non-positive weights.
  */
-export function selectWeightedVariant(variants: ABVariant[]): ABVariant | null {
+function selectWeightedVariant(variants: ABVariant[]): ABVariant | null {
 	if (!variants.length) return null;
 
-	const totalWeight = variants.reduce((sum, v) => sum + Number(v.weight), 0);
+	let totalWeight = 0;
+	for (const variant of variants) {
+		const weight = Number(variant.weight);
+		if (Number.isFinite(weight) && weight > 0) {
+			totalWeight += weight;
+		}
+	}
 	if (totalWeight <= 0) {
 		return variants[0];
 	}
 
-	const random = crypto.getRandomValues(new Uint32Array(1))[0] / 0xffffffff;
+	const random = crypto.getRandomValues(new Uint32Array(1))[0] / 0x100000000;
 	let threshold = random * totalWeight;
+	let lastPositive = variants[0];
 
 	for (const variant of variants) {
-		threshold -= Number(variant.weight);
-		if (threshold <= 0) {
+		const weight = Number(variant.weight);
+		if (!(Number.isFinite(weight) && weight > 0)) continue;
+		lastPositive = variant;
+		threshold -= weight;
+		if (threshold < 0) {
 			return variant;
 		}
 	}
 
-	return variants[variants.length - 1];
+	return lastPositive;
 }
 
 /**
  * Deterministic variant selection based on session ID.
  * Same session always gets same variant for consistency.
- * This solves the #1 complaint about A/B testing in link shorteners.
  */
-export function selectDeterministicVariant(
+function selectDeterministicVariant(
 	variants: ABVariant[],
 	sessionId: string,
 ): ABVariant | null {
